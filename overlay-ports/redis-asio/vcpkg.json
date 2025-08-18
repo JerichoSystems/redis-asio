@@ -2,7 +2,7 @@
     "name": "redis-asio",
     "version-string": "0.1.0",
     "description": "Async Redis client on Boost.Asio + hiredis.",
-    "homepage": "https://github.com/you/redis-asio",
+    "homepage": "https://github.com/JerichoSystems/redis-asio",
     "default-features": [],
     "license": "MIT",
     "dependencies": [
