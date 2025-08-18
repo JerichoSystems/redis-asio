@@ -1,0 +1,22 @@
+{
+    "files.associations": {
+        "memory": "cpp",
+        "target": "cpp",
+        "complex": "cpp",
+        "format": "cpp",
+        "string": "cpp",
+        "vector": "cpp",
+        "expected": "cpp",
+        "sstream": "cpp",
+        "system_error": "cpp",
+        "variant": "cpp",
+        "type_traits": "cpp",
+        "thread": "cpp",
+        "regex": "cpp",
+        "cmath": "cpp",
+        "valarray": "cpp"
+    },
+    "circleci.persistedProjectSelection": [
+        "gh/JerichoSystems/redis-asio"
+    ]
+}

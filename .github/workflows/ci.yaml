@@ -1,0 +1,284 @@
+name: ci
+on:
+  push: { branches: [ main ] }
+  pull_request: {}
+
+permissions:
+  contents: write
+
+env:
+  GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+  # vcpkg manifest mode
+  VCPKG_FEATURE_FLAGS: manifests,binarycaching,dependencygraph
+  VCPKG_OVERLAY_PORTS: ${{ github.workspace }}/overlay-ports
+  VCPKG_MANIFEST_FEATURES: tests,examples
+  # Speed up CMake generator
+
+jobs:
+  build-linux:
+    name: Linux • ${{ matrix.build_type }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        build_type: [Debug, Release]
+    services:
+      redis:
+        image: redis:8-alpine
+        ports: [ "6379:6379" ]
+        options: >-
+          --health-cmd "redis-cli ping || exit 1"
+          --health-interval 3s
+          --health-timeout 2s
+          --health-retries 20
+    env:
+      REDIS_HOST: "127.0.0.1"
+      REDIS_PORT: "6379"
+      # vcpkg binary cache (GitHub-hosted)
+      VCPKG_BINARY_SOURCES: "clear;gha,readwrite"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: "Microsoft/vcpkg"
+          path: "vcpkg"
+          ref: "16c71a39e5a0fc0bdb3fad03beef8f38ee00ee3b"
+      
+
+      - name: Bootstrap vcpkg
+        run: "${{ github.workspace }}/vcpkg/bootstrap-vcpkg.sh"
+        shell: bash
+
+      - name: Install ccache
+        run: sudo apt-get update && sudo apt-get install -y ccache build-essential
+
+      - name: Enable GitHub Actions Cache backend
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Build ports
+        run: ${{ github.workspace }}/vcpkg/vcpkg install
+        env:
+          # X_VCPKG_ASSET_SOURCES: "clear;x-azurl,https://your.domain.com/container,${{ secrets.SAS }},readwrite"
+          VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+          VCPKG_OVERLAY_PORTS: "${{ github.workspace }}/overlay-ports"
+        shell: bash
+
+      - name: Configure
+        env:
+          REDIS_ASIO_SAN: ${{ matrix.build_type == 'Debug' && 'ON' || 'OFF' }}
+        run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+          -DREDIS_ASIO_BUILD_TESTS=ON
+          -DREDIS_ASIO_BUILD_EXAMPLES=ON
+          -DREDIS_ASIO_SANITIZE=${{ env.REDIS_ASIO_SAN }}
+          -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
+          -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        run: cmake --build build --config ${{ matrix.build_type }} -j
+
+      - name: Test
+        run: ctest --test-dir build --build-config ${{ matrix.build_type }} --output-on-failure -j 2
+
+      - name: Archive logs on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ matrix.build_type }}-logs
+          path: |
+            build/Testing
+            build/**/*.log
+            build/**/*.txt
+          if-no-files-found: ignore
+
+#   build-macos-windows:
+#     name: ${{ matrix.os }} • ${{ matrix.build_type }}
+#     runs-on: ${{ matrix.os }}
+#     strategy:
+#       fail-fast: false
+#       matrix:
+#         os: [macos-latest, windows-latest]
+#         build_type: [Debug, Release]
+#     env:
+#       VCPKG_MANIFEST_FEATURES: tests,examples
+#       VCPKG_BINARY_SOURCES: "clear;gha,readwrite"
+#       # No Redis service here; skip integration tests via your own env gate if you want
+#       REDIS_ASIO_RUN_INTEGRATION: "0"
+#     steps:
+#       - uses: actions/checkout@v4
+#       - uses: actions/checkout@v4
+#         with:
+#           repository: "Microsoft/vcpkg"
+#           path: "vcpkg"
+#           ref: "16c71a39e5a0fc0bdb3fad03beef8f38ee00ee3b"
+# 
+#       - name: Bootstrap vcpkg
+#         run: "${{ github.workspace }}/vcpkg/bootstrap-vcpkg.sh"
+#         shell: bash
+# 
+#       # Optional: ccache on macOS
+#       - name: Setup ccache (macOS)
+#         if: matrix.os == 'macos-latest'
+#         run: brew install ccache
+# 
+#       - name: Enable GitHub Actions Cache backend
+#         uses: actions/github-script@v7
+#         with:
+#           script: |
+#             core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+#             core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+# 
+#       - name: Build ports
+#         run: ${{ github.workspace }}/vcpkg/vcpkg install
+#         env:
+#           # X_VCPKG_ASSET_SOURCES: "clear;x-azurl,https://your.domain.com/container,${{ secrets.SAS }},readwrite"
+#           VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+#           VCPKG_OVERLAY_PORTS: "${{ github.workspace }}/overlay-ports"
+#         shell: bash
+# 
+#       - name: Configure
+#         run: >
+#           cmake -S . -B build
+#           -DCMAKE_BUILD_TYPE=${{ matrix.build_type }}
+#           -DREDIS_ASIO_BUILD_TESTS=ON
+#           -DREDIS_ASIO_BUILD_EXAMPLES=ON
+#           -DREDIS_ASIO_SANITIZE=OFF
+#           -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
+#           ${{ matrix.os == 'macos-latest' && '-DCMAKE_CXX_COMPILER_LAUNCHER=ccache' || '' }}
+# 
+#       - name: Build
+#         run: cmake --build build --config ${{ matrix.build_type }} -j
+# 
+#       - name: Test (unit-only)
+#         run: ctest --test-dir build --build-config ${{ matrix.build_type }} --output-on-failure -j 2
+# 
+#       - name: Archive logs on failure
+#         if: failure()
+#         uses: actions/upload-artifact@v4
+#         with:
+#           name: ${{ matrix.os }}-${{ matrix.build_type }}-logs
+#           path: |
+#             build/Testing
+#             build/**/*.log
+#             build/**/*.txt
+#           if-no-files-found: ignore
+
+  # Dedicated sanitizer job (Linux Debug)
+  asan-ubsan:
+    name: Linux • Sanitizers
+    runs-on: ubuntu-latest
+    env:
+      VCPKG_FEATURE_FLAGS: manifests,binarycaching
+      VCPKG_OVERLAY_PORTS: ${{ github.workspace }}/overlay-ports
+      VCPKG_MANIFEST_FEATURES: tests
+      VCPKG_BINARY_SOURCES: "clear;gha,readwrite"
+    services:
+      redis:
+        image: redis:8-alpine
+        ports: [ "6379:6379" ]
+        options: >-
+          --health-cmd "redis-cli ping || exit 1"
+          --health-interval 3s
+          --health-timeout 2s
+          --health-retries 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
+        with:
+          repository: "Microsoft/vcpkg"
+          path: "vcpkg"
+          ref: "16c71a39e5a0fc0bdb3fad03beef8f38ee00ee3b"
+
+      - name: Bootstrap vcpkg
+        run: "${{ github.workspace }}/vcpkg/bootstrap-vcpkg.sh"
+        shell: bash
+
+      - name: Install ccache
+        run: sudo apt-get update && sudo apt-get install -y ccache build-essential
+
+      - name: Enable GitHub Actions Cache backend
+        uses: actions/github-script@v7
+        with:
+          script: |
+            core.exportVariable('ACTIONS_CACHE_URL', process.env.ACTIONS_CACHE_URL || '');
+            core.exportVariable('ACTIONS_RUNTIME_TOKEN', process.env.ACTIONS_RUNTIME_TOKEN || '');
+
+      - name: Build ports
+        run: ${{ github.workspace }}/vcpkg/vcpkg install
+        env:
+          # X_VCPKG_ASSET_SOURCES: "clear;x-azurl,https://your.domain.com/container,${{ secrets.SAS }},readwrite"
+          VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+          VCPKG_OVERLAY_PORTS: "${{ github.workspace }}/overlay-ports"
+        shell: bash
+
+      - run: >
+          cmake -S . -B build
+          -DCMAKE_BUILD_TYPE=Debug
+          -DREDIS_ASIO_BUILD_TESTS=ON
+          -DREDIS_ASIO_BUILD_EXAMPLES=OFF
+          -DREDIS_ASIO_SANITIZE=ON
+          -DCMAKE_TOOLCHAIN_FILE=${{ env.VCPKG_ROOT }}/scripts/buildsystems/vcpkg.cmake
+      - run: cmake --build build -j
+      - run: |
+          UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+          ASAN_OPTIONS=detect_leaks=1:strict_string_checks=1:check_initialization_order=1 \
+          ctest --test-dir build --output-on-failure -j 2
+
+  vcpkg-port-smoke:
+    name: Port smoke (overlay) • ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest]
+    env:
+      VCPKG_FEATURE_FLAGS: manifests,binarycaching
+      VCPKG_BINARY_SOURCES: "clear;gha,readwrite"
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/checkout@v4
+        with:
+          repository: "Microsoft/vcpkg"
+          path: "vcpkg"
+          ref: "16c71a39e5a0fc0bdb3fad03beef8f38ee00ee3b"
+
+      - name: Bootstrap vcpkg
+        run: "${{ github.workspace }}/vcpkg/bootstrap-vcpkg.sh"
+        shell: bash
+
+      - name: Install ccache
+        run: sudo apt-get update && sudo apt-get install -y ccache build-essential
+
+      - name: Build ports
+        run: ${{ github.workspace }}/vcpkg/vcpkg install
+        env:
+          # X_VCPKG_ASSET_SOURCES: "clear;x-azurl,https://your.domain.com/container,${{ secrets.SAS }},readwrite"
+          VCPKG_BINARY_SOURCES: "clear;x-gha,readwrite"
+          VCPKG_OVERLAY_PORTS: "${{ github.workspace }}/overlay-ports"
+        shell: bash
+
+      - name: Build overlay port (tests+examples features)
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p smoke && cd smoke
+          cat > vcpkg.json <<'JSON'
+          {
+            "name": "smoke",
+            "version-string": "0",
+            "dependencies": [
+              { "name": "redis-asio", "default-features": true, "features": [ "tests", "examples" ] }
+            ]
+          }
+          JSON
+          # Pick a sensible default triplet per-OS
+          case "${{ matrix.os }}" in
+            ubuntu-*)  export VCPKG_DEFAULT_TRIPLET=x64-linux ;;
+          esac
+          vcpkg install --overlay-ports="${GITHUB_WORKSPACE}/overlay-ports"

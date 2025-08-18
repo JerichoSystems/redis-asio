@@ -1,0 +1,9 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+
+find_dependency(Threads)
+# hiredis provides imported targets in vcpkg and most distros:
+find_dependency(hiredis CONFIG)
+
+include("${CMAKE_CURRENT_LIST_DIR}/redis_asioTargets.cmake")

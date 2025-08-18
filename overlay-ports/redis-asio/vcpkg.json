@@ -1,0 +1,35 @@
+{
+    "name": "redis-asio",
+    "version-string": "0.1.0",
+    "description": "Async Redis client on Boost.Asio + hiredis.",
+    "homepage": "https://github.com/you/redis-asio",
+    "default-features": [],
+    "license": "MIT",
+    "dependencies": [
+        "boost-asio",
+        { "name": "hiredis", "features": ["ssl"] },
+        { "name": "vcpkg-cmake", "host": true },
+        { "name": "vcpkg-cmake-config", "host": true }
+    ],
+    "features": {
+        "tests": {
+            "description": "Build test binary",
+            "dependencies": [{ "name": "gtest", "default-features": false }]
+        },
+        "examples": {
+            "description": "Build example programs"
+        },
+        "sanitize": {
+            "description": "Enable Address/UB sanitizers"
+        },
+        "benchmarks": {
+            "description": "Build benchmarks using Google Benchmark",
+            "dependencies": [
+                {
+                    "name": "benchmark",
+                    "default-features": false
+                }
+            ]
+        }
+    }
+}

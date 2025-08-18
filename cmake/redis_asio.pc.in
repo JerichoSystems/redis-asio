@@ -1,0 +1,11 @@
+prefix=@CMAKE_INSTALL_PREFIX@
+exec_prefix=${prefix}
+libdir=@CMAKE_INSTALL_FULL_LIBDIR@
+includedir=@CMAKE_INSTALL_FULL_INCLUDEDIR@
+
+Name: redis_asio
+Description: Redis client on Boost.Asio with awaitable API
+Version: @PROJECT_VERSION@
+Libs: -L${libdir} -lredis_asio
+Cflags: -I${includedir}
+Requires: hiredis openssl

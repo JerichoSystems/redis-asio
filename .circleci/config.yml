@@ -1,0 +1,312 @@
+version: 2.1
+
+# Reusable parameters
+parameters:
+  build_type:
+    type: string
+    default: Debug
+    enum: [Debug, Release]
+  store_artifacts:
+    type: boolean
+    default: true
+executors:
+  linux:
+    docker:
+      # Primary build container
+      - image: cimg/base:current
+      # Redis service container (available on localhost:6379)
+      - image: redis:8-alpine
+    resource_class: large
+    environment:
+      CMAKE_GENERATOR: Ninja
+      VCPKG_FEATURE_FLAGS: manifests,binarycaching
+      VCPKG_MANIFEST_FEATURES: tests;examples;benchmarks;
+      VCPKG_OVERLAY_PORTS: /home/circleci/project/overlay-ports
+      VCPKG_BINARY_SOURCES: "clear;files,/home/circleci/.vcpkg-cache,readwrite"
+      # Integration tests target the sidecar service
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: "6379"
+  # macos:
+  #   macos:
+  #     xcode: "16.4.0"
+  #   resource_class: m4pro.medium
+  #   environment:
+  #     CMAKE_GENERATOR: Ninja
+  #     VCPKG_FEATURE_FLAGS: manifests,binarycaching
+  #     VCPKG_OVERLAY_PORTS: /Users/distiller/project/overlay-ports
+  #     VCPKG_MANIFEST_FEATURES: tests;examples;benchmarks;
+  #     VCPKG_BINARY_SOURCES: "clear;files,/Users/distiller/.vcpkg-cache,readwrite"
+  #     REDIS_HOST: 127.0.0.1
+  #     REDIS_PORT: "6379"
+
+commands:
+  install_tooling_linux:
+    steps:
+      - run:
+          name: Install build tools
+          command: |
+            sudo apt-get update
+            sudo apt-get install -y git cmake ninja-build ccache pkg-config curl zip unzip \
+              python3 redis-tools linux-libc-dev
+  # install_tooling_macos:
+  #   steps:
+  #     - run:
+  #         name: Install build tools
+  #         command: |
+  #           brew update
+  #           brew install cmake ninja ccache
+
+  fetch_bootstrap_vcpkg:
+    parameters:
+      vcpkg_dir:
+        type: string
+        default: vcpkg
+    steps:
+      # - restore_cache:
+      #     name: Restore vcpkg git cache
+      #     keys:
+      #       - v1-vcpkg-git-{{ .Branch }}
+      #       - v1-vcpkg-git-
+      - run:
+          name: Clone vcpkg
+          command: |
+            if [ ! -d "<<parameters.vcpkg_dir>>/.git" ]; then
+              git clone https://github.com/microsoft/vcpkg.git "<<parameters.vcpkg_dir>>"
+            fi
+            cd "<<parameters.vcpkg_dir>>"
+            # Ensure full history so any builtin-baseline in your vcpkg.json exists
+            git fetch origin --tags --force --prune
+            # Optionally pin a known-good commit; otherwise stay on latest main
+            # git checkout d2b8b61a0a63fb2e8a2b5ab6d6d1a9fd8d6c2a96
+            ./bootstrap-vcpkg.sh -disableMetrics
+      # - save_cache:
+      #     name: Cache vcpkg git clone
+      #     key: v1-vcpkg-git-{{ .Branch }}
+      #     paths:
+      #       - <<parameters.vcpkg_dir>>
+
+  restore_vcpkg_cache:
+    steps:
+      - restore_cache:
+          keys:
+            - v1-vcpkg-cache-{{ arch }}-{{ .Branch }}-{{ checksum "vcpkg.json" }}
+            - v1-vcpkg-cache-{{ arch }}-{{ .Branch }}
+            - v1-vcpkg-cache-{{ arch }}
+  save_vcpkg_cache:
+    steps:
+      - save_cache:
+          key: v1-vcpkg-cache-{{ arch }}-{{ .Branch }}-{{ checksum "vcpkg.json" }}
+          paths:
+            - ~/.cache/vcpkg
+            - ~/.vcpkg-cache
+            - vcpkg/downloads
+            - vcpkg/installed
+
+  restore_ccache:
+    steps:
+      - restore_cache:
+          keys:
+            - v1-ccache-{{ arch }}-{{ .Branch }}
+            - v1-ccache-{{ arch }}
+      - run: ccache --zero-stats || true
+  save_ccache:
+    steps:
+      - run: ccache --show-stats || true
+      - save_cache:
+          key: v1-ccache-{{ arch }}-{{ .Branch }}
+          paths:
+            - ~/.ccache
+
+jobs:
+  linux-build:
+    executor: linux
+    parameters:
+      build_type:
+        type: string
+        default: Debug
+        enum: [Debug, Release]
+    steps:
+      - checkout
+      - install_tooling_linux
+      - fetch_bootstrap_vcpkg
+      - restore_vcpkg_cache
+      - restore_ccache
+
+      - run:
+          name: Wait for Redis sidecar
+          command: |
+            for i in $(seq 1 60); do
+              if redis-cli -h 127.0.0.1 -p 6379 ping >/dev/null 2>&1; then
+                echo "Redis is ready"; break
+              fi
+              sleep 0.5
+            done
+
+      - run:
+          name: vcpkg install (manifest)
+          command: |
+            export VCPKG_ROOT="$PWD/vcpkg"
+            export VCPKG_MANIFEST_FEATURES="tests;examples;benchmarks;"
+            export VCPKG_OVERLAY_PORTS="${VCPKG_OVERLAY_PORTS}"
+            "$VCPKG_ROOT"/vcpkg install
+      - save_vcpkg_cache
+
+      - run:
+          name: Configure (CMake)
+          command: |
+            # turn SAN on only for Debug
+            SAN=$([[ "<< parameters.build_type >>" == "Debug" ]] && echo ON || echo OFF)
+            echo "Sanitizers: ${SAN}"
+
+            cmake -S . -B build -G Ninja \
+              -DCMAKE_BUILD_TYPE=<< parameters.build_type >> \
+              -DREDIS_ASIO_BUILD_TESTS=ON \
+              -DREDIS_ASIO_BUILD_EXAMPLES=ON \
+              -DREDIS_ASIO_SANITIZE=${SAN} \
+              -DVCPKG_MANIFEST_FEATURES="${VCPKG_MANIFEST_FEATURES}" \
+              -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT:-$PWD/vcpkg}/scripts/buildsystems/vcpkg.cmake"
+      - run: cmake --build build -j
+      - run:
+          name: Run tests
+          command: ctest --test-dir build --output-on-failure -j 2
+      - save_ccache
+      - when:
+          condition:
+            equal: [ "true", "<< pipeline.parameters.store_artifacts >>" ]
+          steps:
+            - store_artifacts:
+                path: build/Testing
+                when: on_fail
+
+#   macos-build:
+#     macos:
+#       xcode: 16.4.0  # or your image
+#     resource_class: m4pro.medium
+#     parameters:
+#       build_type:
+#         type: string
+#         default: Debug
+#         enum: [Debug, Release]
+#     environment:
+#       REDIS_HOST: 127.0.0.1
+#       REDIS_PORT: 6379
+#     steps:
+#       - checkout
+#       - run: brew update
+#       - run: brew install redis
+#       - run: |
+#           redis-server --port 6379 --save "" --appendonly no --daemonize yes
+#           for i in {1..30}; do redis-cli ping && break || sleep 1; done
+#       - install_tooling_macos
+#       - fetch_bootstrap_vcpkg
+#       - restore_vcpkg_cache
+#       - restore_ccache
+# 
+#       - run:
+#           name: vcpkg install (manifest)
+#           command: |
+#             export VCPKG_ROOT="$PWD/vcpkg"
+#             export VCPKG_MANIFEST_FEATURES="tests;examples;benchmarks;"
+#             export VCPKG_OVERLAY_PORTS="${VCPKG_OVERLAY_PORTS}"
+#             "$VCPKG_ROOT"/vcpkg install
+#       - save_vcpkg_cache
+# 
+#       - run:
+#           name: Configure CMake
+#           command: |
+#             cmake -S . -B build \
+#               -G Ninja \
+#               -DCMAKE_BUILD_TYPE=<< parameters.build_type >> \
+#               -DREDIS_ASIO_BUILD_TESTS=ON \
+#               -DREDIS_ASIO_BUILD_EXAMPLES=ON \
+#               -DREDIS_ASIO_SANITIZE=OFF \
+#               -DVCPKG_MANIFEST_FEATURES="${VCPKG_MANIFEST_FEATURES}" \
+#               -DCMAKE_TOOLCHAIN_FILE="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+#               -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+#       - run: cmake --build build -j
+#       - run:
+#           name: Run unit tests
+#           command: ctest --test-dir build --output-on-failure -j 2
+#       - save_ccache
+
+  linux-sanitizers:
+    executor: linux
+    steps:
+      - checkout
+      - install_tooling_linux
+      - fetch_bootstrap_vcpkg
+      - restore_vcpkg_cache
+
+      - run:
+          name: vcpkg install (tests feature only)
+          command: |
+            export VCPKG_ROOT="$PWD/vcpkg"
+            export VCPKG_MANIFEST_FEATURES="tests;examples;benchmarks;"
+            export VCPKG_OVERLAY_PORTS="${VCPKG_OVERLAY_PORTS}"
+            # If you want to trim features for this job, you can add a minimal smoke vcpkg.json; otherwise:
+            "$VCPKG_ROOT"/vcpkg install
+      - save_vcpkg_cache
+
+      - run:
+          name: Configure with ASan/UBSan
+          command: |
+            cmake -S . -B build \
+              -G Ninja \
+              -DCMAKE_BUILD_TYPE=Debug \
+              -DREDIS_ASIO_BUILD_TESTS=ON \
+              -DREDIS_ASIO_BUILD_EXAMPLES=OFF \
+              -DREDIS_ASIO_SANITIZE=ON \
+              -DVCPKG_MANIFEST_FEATURES="${VCPKG_MANIFEST_FEATURES}" \
+              -DCMAKE_TOOLCHAIN_FILE="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - run: cmake --build build -j
+      - run:
+          name: Run tests under sanitizers
+          command: |
+            UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+            ASAN_OPTIONS=detect_leaks=1:strict_string_checks=1:check_initialization_order=1 \
+            ctest --test-dir build --output-on-failure -j 2
+
+  port-smoke-overlay:
+    executor: linux
+    steps:
+      - checkout
+      - install_tooling_linux
+      - fetch_bootstrap_vcpkg
+      - restore_vcpkg_cache
+      - run:
+          name: Smoke consumer builds redis-asio overlay
+          command: |
+            mkdir -p smoke && cd smoke
+            cat > vcpkg.json \<<'JSON'
+            {
+              "name": "smoke",
+              "version-string": "0",
+              "dependencies": [
+                { "name": "redis-asio", "default-features": true, "features": [ "tests", "examples", "benchmarks" ] }
+              ]
+            }
+            JSON
+            export VCPKG_ROOT="$PWD/../vcpkg"
+            "$VCPKG_ROOT"/vcpkg install --overlay-ports="${CIRCLE_WORKING_DIRECTORY}/overlay-ports"
+      - save_vcpkg_cache
+
+workflows:
+  ci:
+    jobs:
+      - linux-build:
+          name: Linux • Debug
+          build_type: Debug
+      # - linux-build:
+      #     name: Linux • Release
+      #     build_type: Release
+      # - macos-build:
+      #     name: macOS • Debug
+      #     build_type: Debug
+      # - macos-build:
+      #     name: macOS • Release
+      #     build_type: Release
+      - linux-sanitizers:
+          name: Linux • Sanitizers
+      - port-smoke-overlay:
+          name: Port smoke (overlay)
