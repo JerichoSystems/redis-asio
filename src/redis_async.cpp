@@ -218,7 +218,7 @@ void RedisAsyncConnection::on_disconnected(int status) {
         redisFreeSSLContext(sslctx_); // we own it; safe to free now
         sslctx_ = nullptr;
     }
-    adapter_->stop();
+    if (adapter_) adapter_->stop();
     adapter_.reset();
     connected_.store(false, std::memory_order_relaxed);
     ping_timer_.cancel();
