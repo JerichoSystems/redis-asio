@@ -120,7 +120,6 @@ void RedisAsyncConnection::stop() {
 
 void RedisAsyncConnection::do_connect(ConnectOptions opts) {
     opts_ = std::move(opts);
-    backoff_ = {};
     stopping_ = false;
     auto attempt = [w = weak_from_this()] {
         if (auto self = w.lock()) {
