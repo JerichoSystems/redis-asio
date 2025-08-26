@@ -27,6 +27,9 @@ auto RedisAsyncConnection::async_connect(ConnectOptions opts, CompletionToken &&
                     self->connect_inflight_ = true;
                     self->do_connect(std::move(opts));
                 });
+            } else {
+                // Connection object already destroyed; complete with operation_aborted.
+                detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped), false);
             }
         },
         token);
@@ -51,6 +54,9 @@ auto RedisAsyncConnection::async_wait_connected(CompletionToken &&token) {
                         detail::complete_on_associated(std::move(h), ex, ec);
                     });
                 });
+            } else {
+                // Connection object already destroyed; complete with operation_aborted.
+                detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped));
             }
         },
         token);
@@ -63,8 +69,7 @@ auto RedisAsyncConnection::async_wait_disconnected(CompletionToken &&token) {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, handler = std::move(handler)]() mutable {
                     if (!self->is_connected()) {
-                        auto h = std::move(handler);
-                        detail::complete_on_associated(std::move(h), self->strand_, std::error_code{});
+                        detail::complete_on_associated(std::move(handler), self->strand_, std::error_code{});
                         return;
                     }
                     if (self->stopping_) {
@@ -76,6 +81,9 @@ auto RedisAsyncConnection::async_wait_disconnected(CompletionToken &&token) {
                         detail::complete_on_associated(std::move(h), ex, ec);
                     });
                 });
+            } else {
+                // Connection object already destroyed; complete with operation_aborted.
+                detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped));
             }
         },
         token);
@@ -112,6 +120,9 @@ auto RedisAsyncConnection::async_subscribe(std::vector<std::string> channels, Co
                         self->issue_sub("SUBSCRIBE", ch, done);
                     }
                 });
+            } else {
+                // Connection object already destroyed; complete with operation_aborted.
+                detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped));
             }
         },
         token);
@@ -148,6 +159,9 @@ auto RedisAsyncConnection::async_psubscribe(std::vector<std::string> patterns, C
                         self->issue_sub("PSUBSCRIBE", p, done);
                     }
                 });
+            } else {
+                // Connection object already destroyed; complete with operation_aborted.
+                detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped));
             }
         },
         token);
@@ -190,6 +204,9 @@ auto RedisAsyncConnection::async_unsubscribe(std::vector<std::string> channels, 
                         }
                     }
                 });
+            } else {
+                // Connection object already destroyed; complete with operation_aborted.
+                detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped));
             }
         },
         token);
@@ -232,6 +249,9 @@ auto RedisAsyncConnection::async_punsubscribe(std::vector<std::string> patterns,
                         }
                     }
                 });
+            } else {
+                // Connection object already destroyed; complete with operation_aborted.
+                detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped));
             }
         },
         token);
@@ -288,9 +308,10 @@ auto RedisAsyncConnection::async_command(const std::vector<std::string> &argv, C
                                                        make_error(error_category::errc::protocol_error), RedisValue{});
                     }
                 });
+            } else {
+                // Connection object already destroyed; complete with operation_aborted.
+                detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped), RedisValue{});
             }
         },
         token);
 }
-
-// (no namespace here; `redis_async.hpp` opens `namespace redis_asio` before including this file)

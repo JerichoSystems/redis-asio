@@ -15,6 +15,7 @@
 #include <chrono>
 #include <expected>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -25,7 +26,6 @@
 #include <unordered_map>
 #include <variant>
 #include <vector>
-#include <iostream>
 
 #include "redis_log.hpp"
 #include "redis_value.hpp"
@@ -150,43 +150,20 @@ inline void complete(H &h, Args &&...args) {
 // Route completion to the handler's associated executor.
 // DECAY-COPY the arguments so no dangling refs cross the boundary.
 template <class H, class FallbackExecutor, class... Args>
-inline void complete_on_associated(H&& h, const FallbackExecutor& fallback, Args&&... args) {
+inline void complete_on_associated(H &&h, const FallbackExecutor &fallback, Args &&...args) {
     using Handler = std::decay_t<H>;
     Handler h2 = std::forward<H>(h);
 
     // Compute traits from the concrete handler instance
-    auto ex    = boost::asio::get_associated_executor(h2, fallback);
+    auto ex = boost::asio::get_associated_executor(h2, fallback);
     auto alloc = boost::asio::get_associated_allocator(h2);
 
     auto tup = std::make_tuple(std::decay_t<Args>(std::forward<Args>(args))...);
-    auto thunk  = [h3 = std::move(h2), tup = std::move(tup)]() mutable {
-        std::apply([&](auto&&... as) { complete(h3, std::forward<decltype(as)>(as)...); }, tup);
+    auto thunk = [h3 = std::move(h2), tup = std::move(tup)]() mutable {
+        std::apply([&](auto &&...as) { complete(h3, std::forward<decltype(as)>(as)...); }, tup);
     };
 
-    using Ex = std::decay_t<decltype(ex)>;
-
-        //boost::asio::dispatch(ex, boost::asio::bind_allocator(alloc, std::move(fn)));
-           auto token = asio::bind_executor(ex, asio::bind_allocator(alloc, std::move(thunk)));
-
-    // Inline-ok semantics:
-    asio::dispatch(std::move(token));
-    // if constexpr (std::is_same_v<Ex, boost::asio::any_completion_executor>) {
-    //     // any_completion_executor doesn't satisfy post(ex, token) constraints.
-    //     // Execute directly (no allocator support on this path).
-    //     //fn.execute(ex, std::move(fn));
-    //     //boost::asio::execute(ex, std::move(fn));
-    //     //boost::asio::post(ex, std::move(fn));
-    //     std::cerr<<"Warning: using any_completion_executor, executing directly\n";
-    //     //fn();
-    //     boost::asio::dispatch(ex, boost::asio::bind_allocator(alloc, std::move(fn)));
-    //     //boost::asio::post(ex, std::move(fn));
-    //     // boost::asio::post(ex, complete(std::move(h));
-    //     // boost::asio::post(ex, complete(std::move(h)boost::asio::bind_allocator(alloc, std::move(fn)));
-    // } else {
-    //     // Normal path: honor associated allocator.
-    //     std::cerr<<"Posting to non-any_completion_executor\n";
-    //     boost::asio::post(ex, boost::asio::bind_allocator(alloc, std::move(fn)));
-    // }
+    boost::asio::dispatch(ex, boost::asio::bind_allocator(alloc, std::move(thunk)));
 }
 
 } // namespace detail
@@ -366,7 +343,7 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     struct SubBaton {
         std::weak_ptr<RedisAsyncConnection> w;
         asio::any_completion_handler<void(std::error_code)> on_ack; // fired once on subscribe/psubscribe ack
-        std::string subject;                         // channel or pattern
+        std::string subject;                                        // channel or pattern
         bool is_pattern{false};
         bool acked{false};
     };
@@ -375,7 +352,7 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     struct UnsubBaton {
         std::weak_ptr<RedisAsyncConnection> w;
         asio::any_completion_handler<void(std::error_code)> on_ack; // fired once on unsubscribe/punsubscribe ack (from the *sub counterpart)
-        std::string subject;                         // channel or pattern
+        std::string subject;                                        // channel or pattern
         bool is_pattern{false};
         bool acked{false};
     };

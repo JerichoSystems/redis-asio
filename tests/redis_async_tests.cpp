@@ -9,11 +9,11 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <iostream>
 #include <string>
 #include <thread>
 #include <tuple>
 #include <variant>
-#include <iostream>
 
 using namespace std::chrono_literals;
 namespace asio = boost::asio;
@@ -342,13 +342,18 @@ TEST(Integration, ReconnectRestoresPsubscriptionsViaClientKill) {
           // Work around GCC coroutine ICE by avoiding mixed init-list with a std::string variable
           std::vector<std::string> kill = {"CLIENT","KILL","ID", idstr};
           std::tie(ec, rv) = co_await c_ctl->async_command(kill, as_tuple(asio::use_awaitable));
-        EXPECT_FALSE(ec);
+          EXPECT_FALSE(ec);
         }
 
         // Wait for disconnect then reconnect
         EXPECT_FALSE(co_await c_sub->async_wait_disconnected(asio::use_awaitable));
         // Give the client time to reconnect; if your impl exposes async_wait_connected, use it:
         EXPECT_FALSE(co_await c_sub->async_wait_connected(asio::use_awaitable));
+
+        // Small delay to ensure the server has processed the re-subscribe after reconnect
+        asio::steady_timer delay(co_await asio::this_coro::executor);
+        delay.expires_after(100ms);
+        co_await delay.async_wait(as_tuple(asio::use_awaitable));
 
         // After reconnect, publish and expect reception due to restored psubscription
         std::tie(ec, rv) = co_await c_ctl->async_command({"PUBLISH","auto.42","after-reconnect"}, as_tuple(asio::use_awaitable));
