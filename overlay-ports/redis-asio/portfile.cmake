@@ -56,8 +56,8 @@ endif()
 if("benchmarks" IN_LIST FEATURES)
     # Ensure the target exists in your CMake when REDIS_ASIO_BUILD_TESTS=ON
     # vcpkg_cmake_build(TARGETS redis_asio_tests)
-    vcpkg_copy_tools(TOOL_NAMES redis_async_benchmark SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin AUTO_CLEAN)
-    vcpkg_copy_tools(TOOL_NAMES redis_value_benchmark SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin AUTO_CLEAN)
+    vcpkg_copy_tools(TOOL_NAMES redis_async_bench SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin AUTO_CLEAN)
+    vcpkg_copy_tools(TOOL_NAMES redis_value_bench SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin AUTO_CLEAN)
 endif()
 
 if("examples" IN_LIST FEATURES)
