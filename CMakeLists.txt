@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(redis_asio VERSION 0.1.3 LANGUAGES CXX)
+project(redis_asio VERSION 0.1.3 LANGUAGES C CXX)
 
 if(POLICY CMP0167)
     # Keep FindBoost module behavior and silence the dev warning.
@@ -9,10 +9,6 @@ endif()
 include(GNUInstallDirs)
 include(CMakePackageConfigHelpers)
 
-set(CMAKE_CXX_STANDARD 23)
-set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF)
-
 # Options
 option(REDIS_ASIO_BUILD_TESTS "Build unit tests" ON)
 option(REDIS_ASIO_BUILD_EXAMPLES "Build examples" ON)
@@ -20,6 +16,13 @@ option(REDIS_ASIO_SANITIZE "Enable ASan/UBSan" OFF)
 option(REDIS_ASIO_BUILD_BENCHMARKS "Build benchmarks (Google Benchmark)" ON)
 option(BUILD_SHARED_LIBS "Build shared libraries" ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
+# Common settings
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+set(CMAKE_CXX_STANDARD 23)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+set(CMAKE_CXX_FLAGS_DEBUG "${CMAKE_CXX_FLAGS_DEBUG} -DDEBUG") # Add debug flag
 
 function(redis_asio_enable_sanitizers target)
     if(REDIS_ASIO_SANITIZE)
