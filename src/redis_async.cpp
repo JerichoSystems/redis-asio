@@ -392,7 +392,7 @@ void RedisAsyncConnection::restore_subscriptions() {
 
 void RedisAsyncConnection::issue_unsub(const char *verb,
                                        std::string_view subject,
-                                       std::function<void(std::error_code)> cb) {
+                                       asio::any_completion_handler<void(std::error_code)> cb) {
     if (!ctx_) {
         if (cb)
             cb(make_error(error_category::errc::not_connected));
@@ -506,7 +506,7 @@ void RedisAsyncConnection::issue_unsub(const char *verb,
 
 void RedisAsyncConnection::issue_sub(const char *verb,
                                      std::string_view subject,
-                                     std::function<void(std::error_code)> cb) {
+                                     asio::any_completion_handler<void(std::error_code)> cb) {
     if (!ctx_) {
         if (cb)
             cb(make_error(error_category::errc::not_connected));

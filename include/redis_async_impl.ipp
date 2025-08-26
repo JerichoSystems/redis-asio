@@ -14,11 +14,11 @@ auto RedisAsyncConnection::async_connect(ConnectOptions opts, CompletionToken &&
                     if (self->is_connected()) {
                         auto h = std::move(handler);
                         // complete on handler's associated executor, not on our strand
-                        detail::complete_on_associated(std::move(h), self->strand_.get_inner_executor(), std::error_code{}, true);
+                        detail::complete_on_associated(std::move(h), self->strand_, std::error_code{}, true);
                         return;
                     }
                     // store a wrapper that will later complete on the handler's executor
-                    auto ex = self->strand_.get_inner_executor();
+                    auto ex = self->strand_;
                     self->add_connect_waiter([h = std::move(handler), ex](std::error_code ec) mutable {
                         detail::complete_on_associated(std::move(h), ex, ec, false);
                     });
@@ -39,14 +39,14 @@ auto RedisAsyncConnection::async_wait_connected(CompletionToken &&token) {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, handler = std::move(handler)]() mutable {
                     if (self->is_connected()) {
-                        detail::complete_on_associated(std::move(handler), self->strand_.get_inner_executor(), std::error_code{});
+                        detail::complete_on_associated(std::move(handler), self->strand_, std::error_code{});
                         return;
                     }
                     if (self->stopping_) {
-                        detail::complete_on_associated(std::move(handler), self->strand_.get_inner_executor(), make_error(error_category::errc::stopped));
+                        detail::complete_on_associated(std::move(handler), self->strand_, make_error(error_category::errc::stopped));
                         return;
                     }
-                    auto ex = self->strand_.get_inner_executor();
+                    auto ex = self->strand_;
                     self->add_connect_waiter([h = std::move(handler), ex](std::error_code ec) mutable {
                         detail::complete_on_associated(std::move(h), ex, ec);
                     });
@@ -64,14 +64,14 @@ auto RedisAsyncConnection::async_wait_disconnected(CompletionToken &&token) {
                 asio::dispatch(self->strand_, [self, handler = std::move(handler)]() mutable {
                     if (!self->is_connected()) {
                         auto h = std::move(handler);
-                        detail::complete_on_associated(std::move(h), self->strand_.get_inner_executor(), std::error_code{});
+                        detail::complete_on_associated(std::move(h), self->strand_, std::error_code{});
                         return;
                     }
                     if (self->stopping_) {
-                        detail::complete_on_associated(std::move(handler), self->strand_.get_inner_executor(), make_error(error_category::errc::stopped));
+                        detail::complete_on_associated(std::move(handler), self->strand_, make_error(error_category::errc::stopped));
                         return;
                     }
-                    auto ex = self->strand_.get_inner_executor();
+                    auto ex = self->strand_;
                     self->add_disconnect_waiter([h = std::move(handler), ex](std::error_code ec) mutable {
                         detail::complete_on_associated(std::move(h), ex, ec);
                     });
@@ -87,7 +87,7 @@ auto RedisAsyncConnection::async_subscribe(std::vector<std::string> channels, Co
         [w = weak_from_this(), channels = std::move(channels)](auto handler) mutable {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, channels = std::move(channels), handler = std::move(handler)]() mutable {
-                    auto ex_fallback = self->strand_.get_inner_executor();
+                    auto ex_fallback = self->strand_;
                     if (!self->ctx_) {
                         detail::complete_on_associated(std::move(handler), ex_fallback, make_error(error_category::errc::not_connected));
                         return;
@@ -123,7 +123,7 @@ auto RedisAsyncConnection::async_psubscribe(std::vector<std::string> patterns, C
         [w = weak_from_this(), patterns = std::move(patterns)](auto handler) mutable {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, patterns = std::move(patterns), handler = std::move(handler)]() mutable {
-                    auto ex_fallback = self->strand_.get_inner_executor();
+                    auto ex_fallback = self->strand_;
                     if (!self->ctx_) {
                         detail::complete_on_associated(std::move(handler), ex_fallback, make_error(error_category::errc::not_connected));
                         return;
@@ -159,7 +159,7 @@ auto RedisAsyncConnection::async_unsubscribe(std::vector<std::string> channels, 
         [w = weak_from_this(), channels = std::move(channels)](auto handler) mutable {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, channels = std::move(channels), handler = std::move(handler)]() mutable {
-                    auto ex_fallback = self->strand_.get_inner_executor();
+                    auto ex_fallback = self->strand_;
                     if (!self->ctx_) {
                         detail::complete_on_associated(std::move(handler), ex_fallback, make_error(error_category::errc::not_connected));
                         return;
@@ -201,7 +201,7 @@ auto RedisAsyncConnection::async_punsubscribe(std::vector<std::string> patterns,
         [w = weak_from_this(), patterns = std::move(patterns)](auto handler) mutable {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, patterns = std::move(patterns), handler = std::move(handler)]() mutable {
-                    auto ex_fallback = self->strand_.get_inner_executor();
+                    auto ex_fallback = self->strand_;
                     if (!self->ctx_) {
                         detail::complete_on_associated(std::move(handler), ex_fallback, make_error(error_category::errc::not_connected));
                         return;
@@ -249,7 +249,7 @@ auto RedisAsyncConnection::async_command(const std::vector<std::string> &argv, C
         [w = weak_from_this(), argv](auto handler) mutable {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, argv, handler = std::move(handler)]() mutable {
-                    auto ex_fallback = self->strand_.get_inner_executor();
+                    auto ex_fallback = self->strand_;
                     if (!self->ctx_) {
                         detail::complete_on_associated(std::move(handler), ex_fallback,
                                                        make_error(error_category::errc::not_connected), RedisValue{});

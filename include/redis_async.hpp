@@ -5,6 +5,7 @@
  */
 
 #include <boost/asio.hpp>
+#include <boost/asio/execution.hpp>
 #include <boost/asio/experimental/concurrent_channel.hpp>
 #include <hiredis/async.h>
 #include <hiredis/hiredis.h>
@@ -24,6 +25,7 @@
 #include <unordered_map>
 #include <variant>
 #include <vector>
+#include <iostream>
 
 #include "redis_log.hpp"
 #include "redis_value.hpp"
@@ -130,19 +132,61 @@ inline void complete(H &h, Args &&...args) {
     }
 }
 
-// Route completion to the handler's associated executor, but DECAY-COPY
-// the arguments so no dangling refs cross the post/dispatch boundary.
-template <class H, class... Args>
-inline void complete_on_associated(H &&h, const asio::any_io_executor &fallback, Args &&...args) {
+// // Route completion to the handler's associated executor, but DECAY-COPY
+// // the arguments so no dangling refs cross the post/dispatch boundary.
+// template <class H, class... Args>
+// inline void complete_on_associated(H &&h, const asio::any_io_executor &fallback, Args &&...args) {
+//     using Handler = std::decay_t<H>;
+//     Handler h2 = std::forward<H>(h);
+//     auto ex = asio::get_associated_executor(h2, fallback);
+//     auto alloc = asio::get_associated_allocator(h2);
+//     auto tup = std::make_tuple(std::decay_t<Args>(std::forward<Args>(args))...);
+//     auto fn = [h3 = std::move(h2), tup = std::move(tup)]() mutable {
+//         std::apply([&](auto &&...as) { detail::complete(h3, std::forward<decltype(as)>(as)...); }, tup);
+//     };
+//     asio::post(ex, asio::bind_allocator(alloc, std::move(fn)));
+// }
+
+// Route completion to the handler's associated executor.
+// DECAY-COPY the arguments so no dangling refs cross the boundary.
+template <class H, class FallbackExecutor, class... Args>
+inline void complete_on_associated(H&& h, const FallbackExecutor& fallback, Args&&... args) {
     using Handler = std::decay_t<H>;
     Handler h2 = std::forward<H>(h);
-    auto ex = asio::get_associated_executor(h2, fallback);
-    auto alloc = asio::get_associated_allocator(h2);
+
+    // Compute traits from the concrete handler instance
+    auto ex    = boost::asio::get_associated_executor(h2, fallback);
+    auto alloc = boost::asio::get_associated_allocator(h2);
+
     auto tup = std::make_tuple(std::decay_t<Args>(std::forward<Args>(args))...);
-    auto fn = [h3 = std::move(h2), tup = std::move(tup)]() mutable {
-        std::apply([&](auto &&...as) { detail::complete(h3, std::forward<decltype(as)>(as)...); }, tup);
+    auto thunk  = [h3 = std::move(h2), tup = std::move(tup)]() mutable {
+        std::apply([&](auto&&... as) { complete(h3, std::forward<decltype(as)>(as)...); }, tup);
     };
-    asio::post(ex, asio::bind_allocator(alloc, std::move(fn)));
+
+    using Ex = std::decay_t<decltype(ex)>;
+
+        //boost::asio::dispatch(ex, boost::asio::bind_allocator(alloc, std::move(fn)));
+           auto token = asio::bind_executor(ex, asio::bind_allocator(alloc, std::move(thunk)));
+
+    // Inline-ok semantics:
+    asio::dispatch(std::move(token));
+    // if constexpr (std::is_same_v<Ex, boost::asio::any_completion_executor>) {
+    //     // any_completion_executor doesn't satisfy post(ex, token) constraints.
+    //     // Execute directly (no allocator support on this path).
+    //     //fn.execute(ex, std::move(fn));
+    //     //boost::asio::execute(ex, std::move(fn));
+    //     //boost::asio::post(ex, std::move(fn));
+    //     std::cerr<<"Warning: using any_completion_executor, executing directly\n";
+    //     //fn();
+    //     boost::asio::dispatch(ex, boost::asio::bind_allocator(alloc, std::move(fn)));
+    //     //boost::asio::post(ex, std::move(fn));
+    //     // boost::asio::post(ex, complete(std::move(h));
+    //     // boost::asio::post(ex, complete(std::move(h)boost::asio::bind_allocator(alloc, std::move(fn)));
+    // } else {
+    //     // Normal path: honor associated allocator.
+    //     std::cerr<<"Posting to non-any_completion_executor\n";
+    //     boost::asio::post(ex, boost::asio::bind_allocator(alloc, std::move(fn)));
+    // }
 }
 
 } // namespace detail
@@ -321,7 +365,7 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     // Long-lived baton for SUBSCRIBE/PSUBSCRIBE: receives ack + all publishes + unsubscribe/punsubscribe
     struct SubBaton {
         std::weak_ptr<RedisAsyncConnection> w;
-        std::function<void(std::error_code)> on_ack; // fired once on subscribe/psubscribe ack
+        asio::any_completion_handler<void(std::error_code)> on_ack; // fired once on subscribe/psubscribe ack
         std::string subject;                         // channel or pattern
         bool is_pattern{false};
         bool acked{false};
@@ -330,7 +374,7 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     // Long-lived baton for UNSUBSCRIBE/PUNSUBSCRIBE: receives ack + all errors
     struct UnsubBaton {
         std::weak_ptr<RedisAsyncConnection> w;
-        std::function<void(std::error_code)> on_ack; // fired once on unsubscribe/punsubscribe ack (from the *sub counterpart)
+        asio::any_completion_handler<void(std::error_code)> on_ack; // fired once on unsubscribe/punsubscribe ack (from the *sub counterpart)
         std::string subject;                         // channel or pattern
         bool is_pattern{false};
         bool acked{false};
@@ -345,22 +389,22 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     void restore_subscriptions();
 
     // SUB/PSUB helper
-    void issue_sub(const char *verb, std::string_view subject, std::function<void(std::error_code)> cb);
-    void issue_unsub(const char *verb, std::string_view subject, std::function<void(std::error_code)> cb);
+    void issue_sub(const char *verb, std::string_view subject, asio::any_completion_handler<void(std::error_code)> cb);
+    void issue_unsub(const char *verb, std::string_view subject, asio::any_completion_handler<void(std::error_code)> cb);
 
-    uint64_t add_connect_waiter(std::move_only_function<void(std::error_code)> h) {
+    uint64_t add_connect_waiter(asio::any_completion_handler<void(std::error_code)> h) {
         const auto id = next_waiter_id_++;
         connect_waiters_.emplace(id, std::move(h));
         return id;
     }
-    uint64_t add_disconnect_waiter(std::move_only_function<void(std::error_code)> h) {
+    uint64_t add_disconnect_waiter(asio::any_completion_handler<void(std::error_code)> h) {
         const auto id = next_waiter_id_++;
         disconnect_waiters_.emplace(id, std::move(h));
         return id;
     }
 
     // Returns the completion function if removed, else empty.
-    std::move_only_function<void(std::error_code)> erase_connect_waiter(uint64_t id) {
+    asio::any_completion_handler<void(std::error_code)> erase_connect_waiter(uint64_t id) {
         auto it = connect_waiters_.find(id);
         if (it == connect_waiters_.end())
             return {};
@@ -370,7 +414,7 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     }
 
     // Returns the completion function if removed, else empty.
-    std::move_only_function<void(std::error_code)> erase_disconnect_waiter(uint64_t id) {
+    asio::any_completion_handler<void(std::error_code)> erase_disconnect_waiter(uint64_t id) {
         auto it = disconnect_waiters_.find(id);
         if (it == disconnect_waiters_.end())
             return {};
@@ -410,8 +454,8 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     SubSet ch_;
     SubSet pch_;
 
-    std::unordered_map<uint64_t, std::move_only_function<void(std::error_code)>> connect_waiters_;
-    std::unordered_map<uint64_t, std::move_only_function<void(std::error_code)>> disconnect_waiters_;
+    std::unordered_map<uint64_t, asio::any_completion_handler<void(std::error_code)>> connect_waiters_;
+    std::unordered_map<uint64_t, asio::any_completion_handler<void(std::error_code)>> disconnect_waiters_;
     std::atomic_uint64_t next_waiter_id_{0};
 
     // Handshake & health state
@@ -422,6 +466,6 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
 
 // ===== Inline template implementations =====
 
-#include "redis_async_impl.hpp"
+#include "redis_async_impl.ipp"
 
 } // namespace redis_asio

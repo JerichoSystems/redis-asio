@@ -198,6 +198,8 @@ if(REDIS_ASIO_BUILD_BENCHMARKS)
 
     add_test(NAME RedisValueBench COMMAND redis_value_bench --benchmark_out_format=console)
     add_test(NAME RedisAsyncBench COMMAND redis_async_bench --benchmark_out_format=console)
+    set_tests_properties(RedisValueBench PROPERTIES TIMEOUT 20)
+    set_tests_properties(RedisAsyncBench PROPERTIES TIMEOUT 300)
 
     install(TARGETS redis_value_bench RUNTIME DESTINATION bin)
     install(TARGETS redis_async_bench RUNTIME DESTINATION bin)
@@ -210,7 +212,7 @@ install(TARGETS redis_asio
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR}
     INCLUDES DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp")
+install(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR}/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR} FILES_MATCHING PATTERN "*.h" PATTERN "*.hpp" PATTERN "*.ipp")
 
 write_basic_package_version_file(
     "${CMAKE_CURRENT_BINARY_DIR}/redis_asioConfigVersion.cmake"
