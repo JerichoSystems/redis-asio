@@ -345,11 +345,11 @@ TEST(Integration, ReconnectRestoresPsubscriptionsViaClientKill) {
         auto idstr = std::to_string(*idp);
 
         // Kill the subscriber connection from the controller connection
-         {
-          // Work around GCC coroutine ICE by avoiding mixed init-list with a std::string variable
-          std::vector<std::string> kill = {"CLIENT","KILL","ID", idstr};
-          std::tie(ec, rv) = co_await c_ctl->async_command(kill, as_tuple(asio::use_awaitable));
-          EXPECT_FALSE(ec);
+        {
+            // Work around GCC coroutine ICE by avoiding mixed init-list with a std::string variable
+            std::vector<std::string> kill = {"CLIENT", "KILL", "ID", idstr};
+            std::tie(ec, rv) = co_await c_ctl->async_command(kill, as_tuple(asio::use_awaitable));
+            EXPECT_FALSE(ec);
         }
 
         // Wait for disconnect then reconnect

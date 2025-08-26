@@ -249,7 +249,7 @@ auto RedisAsyncConnection::async_unsubscribe(std::vector<std::string> channels, 
                             self->issue_unsub("UNSUBSCRIBE", ch, done);
                         } else {
                             // No active subscription, just complete
-                            detail::complete_on_associated(done, ex_fallback, std::error_code{});
+                            detail::complete_on_associated(std::move(done), ex_fallback, std::error_code{});
                         }
                     }
                 });
@@ -294,7 +294,7 @@ auto RedisAsyncConnection::async_punsubscribe(std::vector<std::string> patterns,
                             self->issue_unsub("PUNSUBSCRIBE", p, done);
                         } else {
                             // No active subscription, just complete
-                            detail::complete_on_associated(done, ex_fallback, std::error_code{});
+                            detail::complete_on_associated(std::move(done), ex_fallback, std::error_code{});
                         }
                     }
                 });
