@@ -66,7 +66,6 @@ if(REDIS_ASIO_BUILD_TESTS)
 
     add_executable(redis_async_tests
         tests/redis_async_tests.cpp
-        tests/redis_value_tests.cpp
     )
 
     target_link_libraries(redis_async_tests PRIVATE Boost::asio redis_asio GTest::gtest_main)
@@ -77,6 +76,19 @@ if(REDIS_ASIO_BUILD_TESTS)
         ${Boost_INCLUDE_DIRS})
 
     redis_asio_enable_sanitizers(redis_async_tests)
+
+    add_executable(redis_value_tests
+        tests/redis_value_tests.cpp
+    )
+
+    target_link_libraries(redis_value_tests PRIVATE Boost::asio redis_asio GTest::gtest_main)
+    target_include_directories(redis_value_tests
+        PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+        ${Boost_INCLUDE_DIRS})
+
+    redis_asio_enable_sanitizers(redis_value_tests)
 
     add_executable(redis_log_on_tests
         tests/redis_log_on_tests.cpp
@@ -152,12 +164,14 @@ if(REDIS_ASIO_BUILD_TESTS)
     include(GoogleTest)
     gtest_discover_tests(redis_asio_tests)
     gtest_discover_tests(redis_async_tests)
+    gtest_discover_tests(redis_value_tests)
     gtest_discover_tests(redis_log_on_tests)
     gtest_discover_tests(redis_log_off_tests)
     gtest_discover_tests(redis_log_rt_tests)
 
     install(TARGETS redis_asio_tests RUNTIME DESTINATION bin)
     install(TARGETS redis_async_tests RUNTIME DESTINATION bin)
+    install(TARGETS redis_value_tests RUNTIME DESTINATION bin)
     install(TARGETS redis_log_on_tests RUNTIME DESTINATION bin)
     install(TARGETS redis_log_off_tests RUNTIME DESTINATION bin)
     install(TARGETS redis_log_rt_tests RUNTIME DESTINATION bin)
