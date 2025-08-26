@@ -42,7 +42,7 @@ To build and run the tests:
 ```sh
 cmake -B build -DREDIS_ASIO_BUILD_TESTS=ON
 cmake --build build
-./build/redis_asio_tests
+ctest --test-dir build --output-on-failure
 ```
 
 ## License

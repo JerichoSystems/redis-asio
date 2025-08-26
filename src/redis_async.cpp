@@ -73,13 +73,13 @@ void RedisAsyncConnection::shutdown_from_dtor_() noexcept {
     connect_waiters_.clear();
     auto dw = std::move(disconnect_waiters_);
     disconnect_waiters_.clear();
-    for (auto &h : cw) {
+    for (auto &[id, h] : cw) {
         try {
             h(make_error(error_category::errc::stopped));
         } catch (...) {
         }
     }
-    for (auto &h : dw) {
+    for (auto &[id, h] : dw) {
         try {
             h(make_error(error_category::errc::stopped));
         } catch (...) {
@@ -97,13 +97,13 @@ void RedisAsyncConnection::stop() {
         self->connect_waiters_.clear();
         auto dw = std::move(self->disconnect_waiters_);
         self->disconnect_waiters_.clear();
-        for (auto &h : cw) {
+        for (auto &[id, h] : cw) {
             try {
                 detail::complete_on_associated(std::move(h), self->strand_, make_error(error_category::errc::stopped));
             } catch (...) {
             }
         }
-        for (auto &h : dw) {
+        for (auto &[id, h] : dw) {
             try {
                 detail::complete_on_associated(std::move(h), self->strand_, make_error(error_category::errc::stopped));
             } catch (...) {
@@ -147,7 +147,7 @@ void RedisAsyncConnection::do_connect(ConnectOptions opts) {
 
             redisAsyncSetConnectCallback(self->ctx_, &RedisAsyncConnection::handle_connect);
             redisAsyncSetDisconnectCallback(self->ctx_, &RedisAsyncConnection::handle_disconnect);
-            //redisAsyncSetPushCallback(self->ctx_, &RedisAsyncConnection::handle_push);
+            // redisAsyncSetPushCallback(self->ctx_, &RedisAsyncConnection::handle_push);
 
             if (self->opts_.tls.use_tls) {
                 redisSSLContextError ssl_err = REDIS_SSL_CTX_NONE;
@@ -217,15 +217,16 @@ void RedisAsyncConnection::on_disconnected(int status) {
         redisFreeSSLContext(sslctx_); // we own it; safe to free now
         sslctx_ = nullptr;
     }
-    if (adapter_) adapter_->stop();
+    if (adapter_)
+        adapter_->stop();
     adapter_.reset();
     connected_.store(false, std::memory_order_relaxed);
     ping_timer_.cancel();
 
     auto d = std::move(disconnect_waiters_);
     disconnect_waiters_.clear();
-    for (auto &h : d) {
-        // asio::post(strand_, [hh = std::move(h)]() mutable { hh(make_error(error_category::errc::stopped)); });
+    for (auto &[id, h] : d) {
+        REDIS_CRITICAL_RT(log_, "notifying disconnect waiter {}", id);
         detail::complete_on_associated(std::move(h), strand_, make_error(error_category::errc::stopped));
     }
     connect_inflight_ = false;
@@ -291,7 +292,7 @@ static PublishMessage parse_pubsub_reply(redisReply *r) {
     }
     return pm;
 }
-// 
+//
 // void RedisAsyncConnection::handle_push(redisAsyncContext *c, void *r) {
 //     auto *self = static_cast<RedisAsyncConnection *>(c->data);
 //     if (!self)
@@ -367,7 +368,7 @@ void RedisAsyncConnection::send_handshake_hello() {
           self->restore_subscriptions();
           self->start_keepalive();
           auto waiters = std::move(self->connect_waiters_); self->connect_waiters_.clear();
-          for (auto& h : waiters) { 
+          for (auto& [id, h] : waiters) { 
             //asio::post(self->strand_, [hh = std::move(h)]() mutable { hh({}); }); 
             detail::complete_on_associated(std::move(h), self->strand_, std::error_code{});
         }
@@ -391,7 +392,7 @@ void RedisAsyncConnection::restore_subscriptions() {
 
 void RedisAsyncConnection::issue_unsub(const char *verb,
                                        std::string_view subject,
-                                       std::function<void(std::error_code)> cb) {
+                                       asio::any_completion_handler<void(std::error_code)> cb) {
     if (!ctx_) {
         if (cb)
             cb(make_error(error_category::errc::not_connected));
@@ -505,7 +506,7 @@ void RedisAsyncConnection::issue_unsub(const char *verb,
 
 void RedisAsyncConnection::issue_sub(const char *verb,
                                      std::string_view subject,
-                                     std::function<void(std::error_code)> cb) {
+                                     asio::any_completion_handler<void(std::error_code)> cb) {
     if (!ctx_) {
         if (cb)
             cb(make_error(error_category::errc::not_connected));

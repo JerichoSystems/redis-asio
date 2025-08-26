@@ -5,6 +5,7 @@
  */
 
 #include <boost/asio.hpp>
+#include <boost/asio/execution.hpp>
 #include <boost/asio/experimental/concurrent_channel.hpp>
 #include <hiredis/async.h>
 #include <hiredis/hiredis.h>
@@ -14,6 +15,7 @@
 #include <chrono>
 #include <expected>
 #include <functional>
+#include <iostream>
 #include <memory>
 #include <optional>
 #include <string>
@@ -73,6 +75,11 @@ inline const std::error_category &category() {
 inline std::error_code make_error(error_category::errc e) { return {static_cast<int>(e), category()}; }
 
 // ---- Options ----
+/**
+ * TLSOptions
+ *
+ * Configuration options for TLS connections. All file-path entries are optional.
+ */
 struct TLSOptions {
     bool use_tls{false};
     std::string ca_file;   // PEM bundle filename (optional)
@@ -82,6 +89,11 @@ struct TLSOptions {
     bool verify_peer{true};
 };
 
+/**
+ * ConnectOptions
+ *
+ * Options controlling how the client connects and reconnects to the Redis server.
+ */
 struct ConnectOptions {
     std::string host{"127.0.0.1"};
     uint16_t port{6379};
@@ -97,6 +109,12 @@ struct ConnectOptions {
     std::optional<std::string> client_name; // optional: sent via HELLO SETNAME
 };
 
+/**
+ * PublishMessage
+ *
+ * Represents a PUB/SUB message delivered from the server. For pattern-based
+ * deliveries `pattern` is present.
+ */
 struct PublishMessage {
     std::string channel;
     std::string payload;
@@ -114,96 +132,196 @@ inline void complete(H &h, Args &&...args) {
     }
 }
 
-// // Run completion on the handler's associated executor & allocator.
-// template <class Handler, class... Args>
-// inline void complete_on_associated(Handler &&h,
-//                                    const boost::asio::any_io_executor &fallback_ex,
-//                                    Args &&...args) {
-//     namespace asio = boost::asio;
-//     auto ex = asio::get_associated_executor(h, fallback_ex);
-//     auto al = asio::get_associated_allocator(h);
-//     asio::post(ex, asio::bind_allocator(
-//                        al, [h = std::forward<Handler>(h), tup = std::make_tuple(std::forward<Args>(args)...)]() mutable {
-//                            std::apply([&](auto &&...a) { detail::complete(h, std::forward<decltype(a)>(a)...); }, tup);
-//                        }));
+// // Route completion to the handler's associated executor, but DECAY-COPY
+// // the arguments so no dangling refs cross the post/dispatch boundary.
+// template <class H, class... Args>
+// inline void complete_on_associated(H &&h, const asio::any_io_executor &fallback, Args &&...args) {
+//     using Handler = std::decay_t<H>;
+//     Handler h2 = std::forward<H>(h);
+//     auto ex = asio::get_associated_executor(h2, fallback);
+//     auto alloc = asio::get_associated_allocator(h2);
+//     auto tup = std::make_tuple(std::decay_t<Args>(std::forward<Args>(args))...);
+//     auto fn = [h3 = std::move(h2), tup = std::move(tup)]() mutable {
+//         std::apply([&](auto &&...as) { detail::complete(h3, std::forward<decltype(as)>(as)...); }, tup);
+//     };
+//     asio::post(ex, asio::bind_allocator(alloc, std::move(fn)));
 // }
-// Route completion to the handler's associated executor, but DECAY-COPY
-// the arguments so no dangling refs cross the post/dispatch boundary.
-template <class H, class... Args>
-inline void complete_on_associated(H &&h, const asio::any_io_executor &fallback, Args &&...args) {
+
+// Route completion to the handler's associated executor.
+// DECAY-COPY the arguments so no dangling refs cross the boundary.
+template <class H, class FallbackExecutor, class... Args>
+inline void complete_on_associated(H &&h, const FallbackExecutor &fallback, Args &&...args) {
     using Handler = std::decay_t<H>;
     Handler h2 = std::forward<H>(h);
-    auto ex = asio::get_associated_executor(h2, fallback);
-    auto alloc = asio::get_associated_allocator(h2);
+
+    // Compute traits from the concrete handler instance
+    auto ex = boost::asio::get_associated_executor(h2, fallback);
+    auto alloc = boost::asio::get_associated_allocator(h2);
+
     auto tup = std::make_tuple(std::decay_t<Args>(std::forward<Args>(args))...);
-    auto fn = [h3 = std::move(h2), tup = std::move(tup)]() mutable {
-        std::apply([&](auto &&...as) { detail::complete(h3, std::forward<decltype(as)>(as)...); }, tup);
+    auto thunk = [h3 = std::move(h2), tup = std::move(tup)]() mutable {
+        std::apply([&](auto &&...as) { complete(h3, std::forward<decltype(as)>(as)...); }, tup);
     };
-    asio::post(ex, asio::bind_allocator(alloc, std::move(fn)));
+
+    boost::asio::dispatch(ex, boost::asio::bind_allocator(alloc, std::move(thunk)));
 }
 
 } // namespace detail
 
+/**
+ * RedisAsyncConnection
+ *
+ * Asynchronous, coroutine-friendly wrapper around a hiredis async context.
+ * Thread-affine: all internal operations run on the executor/strand provided
+ * to `create()`; public API methods are safe to call from any thread and use
+ * completion handlers or awaitable completion tokens (Boost.Asio).
+ */
 class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConnection> {
   public:
     using executor_type = asio::any_io_executor;
 
+    /**
+     * Create a connection instance bound to `exec`.
+     *
+     * Parameters:
+     * - exec: executor or io_context where the connection's strand will run.
+     * - logger: optional logger; defaults to a null logger.
+     * - max_backlog: size of the internal pub/sub backlog channel.
+     */
     static std::shared_ptr<RedisAsyncConnection> create(executor_type exec, std::shared_ptr<Logger> logger = make_null_logger(), size_t max_backlog = 1024);
+
+    /**
+     * Destructor; performs best-effort synchronous shutdown.
+     */
     ~RedisAsyncConnection() noexcept { shutdown_from_dtor_(); }
 
+    /**
+     * Return the executor bound to this connection (the inner executor of
+     * the strand used for serialized execution of internal state).
+     */
     executor_type get_executor() const noexcept { return strand_.get_inner_executor(); }
 
-    // completion: void(std::error_code, bool already_connected)
+    /**
+     * Initiate a connection (or return immediately if already connected).
+     * Completion signature: void(std::error_code, bool already_connected).
+     *
+     * The CompletionToken can be any Asio completion token (co_await, use_future,
+     * completion handler, etc.).
+     */
     template <typename CompletionToken>
     auto async_connect(ConnectOptions opts, CompletionToken &&token);
 
+    /**
+     * Await until the connection is established. Completion signature:
+     * void(std::error_code) where a default-constructed error_code means success.
+     */
     template <typename CompletionToken>
     auto async_wait_connected(CompletionToken &&token);
 
+    /**
+     * Await until the connection has become disconnected. Completion signature:
+     * void(std::error_code) where default-constructed error_code means success.
+     */
     template <typename CompletionToken>
     auto async_wait_disconnected(CompletionToken &&token);
 
+    /**
+     * Subscribe to one or more channels. Completion signature: void(std::error_code).
+     * The handler will be invoked once the SUBSCRIBE has been acknowledged by the server.
+     */
     template <typename CompletionToken>
     auto async_subscribe(std::vector<std::string> channels, CompletionToken &&token);
 
+    /**
+     * Pattern-subscribe to one or more patterns (PSUBSCRIBE). Completion
+     * signature: void(std::error_code).
+     */
     template <typename CompletionToken>
     auto async_psubscribe(std::vector<std::string> patterns, CompletionToken &&token);
 
+    /**
+     * Unsubscribe from channels. Completion signature: void(std::error_code).
+     * If a channel has multiple subscribe references, use_count semantics apply.
+     */
     template <typename CompletionToken>
     auto async_unsubscribe(std::vector<std::string> channels, CompletionToken &&token);
 
+    /**
+     * Unsubscribe from patterns (PUNSUBSCRIBE). Completion signature:
+     * void(std::error_code).
+     */
     template <typename CompletionToken>
     auto async_punsubscribe(std::vector<std::string> patterns, CompletionToken &&token);
 
+    /**
+     * Await delivery of the next publish message from the server.
+     * Completion signature: void(boost::system::error_code, PublishMessage)
+     * (the channel uses Boost.System compatibility for the concurrent_channel API).
+     */
     template <typename CompletionToken>
     auto async_receive_publish(CompletionToken &&token);
 
+    /**
+     * Execute a Redis command. The `argv` vector contains the command name and
+     * its arguments. Completion signature: void(std::error_code, RedisValue).
+     *
+     * The call is safe from any thread; the actual command is submitted on the
+     * connection's strand. If the connection is not established, the error
+     * `error_category::errc::not_connected` is returned immediately.
+     */
     template <typename CompletionToken>
     auto async_command(const std::vector<std::string> &argv, CompletionToken &&token);
 
     // Human-readable HELLO summary (e.g., "redis 7.2 proto=3 role=master")
+    /**
+     * Human-readable HELLO summary returned from the server after connection
+     * setup (e.g. "redis 7.2 proto=3 role=master"). Empty before handshake.
+     */
     std::string hello_summary() const { return hello_summary_; }
 
     enum class Health { healthy,
                         suspect,
                         unhealthy };
+    /**
+     * Returns the last-known connection health state.
+     */
     Health health() const noexcept { return health_; }
 
+    /**
+     * Stop the connection and cancel outstanding waiters. Safe to call from
+     * any thread; completion handlers waiting on connected/disconnected will
+     * be invoked with `error_category::errc::stopped`.
+     */
     void stop();
 
+    /**
+     * Returns true if the connection is currently established.
+     */
     bool is_connected() const noexcept { return connected_.load(std::memory_order_relaxed); }
+    /**
+     * Returns whether RESP3 is used by the connection (currently always true).
+     */
     bool using_resp3() const noexcept { return true; }
 
     struct WaiterCounts {
         std::size_t connect;
         std::size_t disconnect;
     };
+    /**
+     * Return number of currently-registered waiters for connect/disconnect.
+     */
     WaiterCounts waiter_count() const noexcept { return {connect_waiters_.size(), disconnect_waiters_.size()}; }
 
+    /**
+     * Return the logger used by this connection (never null).
+     */
     inline std::shared_ptr<Logger> get_logger() const {
         return log_ ? log_ : make_null_logger();
     }
 
+    /**
+     * Initialize OpenSSL for hiredis (safe to call multiple times).
+     */
     static void initOpenSSL() {
         static std::once_flag once;
         std::call_once(once, [] { redisInitOpenSSL(); }); // safe no-op on modern OpenSSL
@@ -224,8 +342,8 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     // Long-lived baton for SUBSCRIBE/PSUBSCRIBE: receives ack + all publishes + unsubscribe/punsubscribe
     struct SubBaton {
         std::weak_ptr<RedisAsyncConnection> w;
-        std::function<void(std::error_code)> on_ack; // fired once on subscribe/psubscribe ack
-        std::string subject;                         // channel or pattern
+        asio::any_completion_handler<void(std::error_code)> on_ack; // fired once on subscribe/psubscribe ack
+        std::string subject;                                        // channel or pattern
         bool is_pattern{false};
         bool acked{false};
     };
@@ -233,8 +351,8 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     // Long-lived baton for UNSUBSCRIBE/PUNSUBSCRIBE: receives ack + all errors
     struct UnsubBaton {
         std::weak_ptr<RedisAsyncConnection> w;
-        std::function<void(std::error_code)> on_ack; // fired once on unsubscribe/punsubscribe ack (from the *sub counterpart)
-        std::string subject;                         // channel or pattern
+        asio::any_completion_handler<void(std::error_code)> on_ack; // fired once on unsubscribe/punsubscribe ack (from the *sub counterpart)
+        std::string subject;                                        // channel or pattern
         bool is_pattern{false};
         bool acked{false};
     };
@@ -248,11 +366,40 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     void restore_subscriptions();
 
     // SUB/PSUB helper
-    void issue_sub(const char *verb, std::string_view subject, std::function<void(std::error_code)> cb);
-    void issue_unsub(const char *verb, std::string_view subject, std::function<void(std::error_code)> cb);
+    void issue_sub(const char *verb, std::string_view subject, asio::any_completion_handler<void(std::error_code)> cb);
+    void issue_unsub(const char *verb, std::string_view subject, asio::any_completion_handler<void(std::error_code)> cb);
 
-    void add_connect_waiter(std::move_only_function<void(std::error_code)> h) { connect_waiters_.push_back(std::move(h)); }
-    void add_disconnect_waiter(std::move_only_function<void(std::error_code)> h) { disconnect_waiters_.push_back(std::move(h)); }
+    uint64_t add_connect_waiter(asio::any_completion_handler<void(std::error_code)> h) {
+        const auto id = next_waiter_id_++;
+        connect_waiters_.emplace(id, std::move(h));
+        return id;
+    }
+    uint64_t add_disconnect_waiter(asio::any_completion_handler<void(std::error_code)> h) {
+        const auto id = next_waiter_id_++;
+        disconnect_waiters_.emplace(id, std::move(h));
+        return id;
+    }
+
+    // Returns the completion function if removed, else empty.
+    asio::any_completion_handler<void(std::error_code)> erase_connect_waiter(uint64_t id) {
+        auto it = connect_waiters_.find(id);
+        if (it == connect_waiters_.end())
+            return {};
+        auto fn = std::move(it->second);
+        connect_waiters_.erase(it);
+        return std::move(fn);
+    }
+
+    // Returns the completion function if removed, else empty.
+    asio::any_completion_handler<void(std::error_code)> erase_disconnect_waiter(uint64_t id) {
+        auto it = disconnect_waiters_.find(id);
+        if (it == disconnect_waiters_.end())
+            return {};
+        auto fn = std::move(it->second);
+        disconnect_waiters_.erase(it);
+        return std::move(fn);
+    }
+
     // keepalive
     void start_keepalive();
     void schedule_next_ping();
@@ -284,8 +431,10 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     SubSet ch_;
     SubSet pch_;
 
-    std::vector<std::move_only_function<void(std::error_code)>> connect_waiters_;
-    std::vector<std::move_only_function<void(std::error_code)>> disconnect_waiters_;
+    std::unordered_map<uint64_t, asio::any_completion_handler<void(std::error_code)>> connect_waiters_;
+    std::unordered_map<uint64_t, asio::any_completion_handler<void(std::error_code)>> disconnect_waiters_;
+    std::atomic_uint64_t next_waiter_id_{0};
+
     // Handshake & health state
     std::string hello_summary_;
     Health health_{Health::healthy};
@@ -294,293 +443,6 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
 
 // ===== Inline template implementations =====
 
-template <typename CompletionToken>
-auto RedisAsyncConnection::async_connect(ConnectOptions opts, CompletionToken &&token) {
-    using Sig = void(std::error_code, bool);
-    return asio::async_initiate<CompletionToken, Sig>(
-        [w = weak_from_this(), opts = std::move(opts)](auto handler) mutable {
-            if (auto self = w.lock()) {
-                asio::dispatch(self->strand_, [self, opts = std::move(opts), handler = std::move(handler)]() mutable {
-                    if (self->is_connected()) {
-                        auto h = std::move(handler);
-                        // complete on handler's associated executor, not on our strand
-                        detail::complete_on_associated(std::move(h), self->strand_.get_inner_executor(), std::error_code{}, true);
-                        return;
-                    }
-                    // store a wrapper that will later complete on the handler's executor
-                    auto ex = self->strand_.get_inner_executor();
-                    self->add_connect_waiter([h = std::move(handler), ex](std::error_code ec) mutable {
-                        detail::complete_on_associated(std::move(h), ex, ec, false);
-                    });
-                    if (self->connect_inflight_)
-                        return;
-                    self->connect_inflight_ = true;
-                    self->do_connect(std::move(opts));
-                });
-            }
-        },
-        token);
-}
-
-template <typename CompletionToken>
-auto RedisAsyncConnection::async_wait_connected(CompletionToken &&token) {
-    return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [w = weak_from_this()](auto handler) {
-            if (auto self = w.lock()) {
-                asio::dispatch(self->strand_, [self, handler = std::move(handler)]() mutable {
-                    if (self->is_connected()) {
-                        detail::complete_on_associated(std::move(handler), self->strand_.get_inner_executor(), std::error_code{});
-                        return;
-                    }
-                    if(self->stopping_) {
-                        detail::complete_on_associated(std::move(handler), self->strand_.get_inner_executor(), make_error(error_category::errc::stopped));
-                        return;
-                    }
-                    auto ex = self->strand_.get_inner_executor();
-                    self->add_connect_waiter([h = std::move(handler), ex](std::error_code ec) mutable {
-                        detail::complete_on_associated(std::move(h), ex, ec);
-                    });
-                });
-            }
-        },
-        token);
-}
-
-template <typename CompletionToken>
-auto RedisAsyncConnection::async_wait_disconnected(CompletionToken &&token) {
-    return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [w = weak_from_this()](auto handler) {
-            if (auto self = w.lock()) {
-                asio::dispatch(self->strand_, [self, handler = std::move(handler)]() mutable {
-                    if (!self->is_connected()) {
-                        auto h = std::move(handler);
-                        detail::complete_on_associated(std::move(h), self->strand_.get_inner_executor(), std::error_code{});
-                        return;
-                    }
-                    if(self->stopping_) {
-                        detail::complete_on_associated(std::move(handler), self->strand_.get_inner_executor(), make_error(error_category::errc::stopped));
-                        return;
-                    }
-                    auto ex = self->strand_.get_inner_executor();
-                    self->add_disconnect_waiter([h = std::move(handler), ex](std::error_code ec) mutable {
-                        detail::complete_on_associated(std::move(h), ex, ec);
-                    });
-                });
-            }
-        },
-        token);
-}
-
-template <typename CompletionToken>
-auto RedisAsyncConnection::async_subscribe(std::vector<std::string> channels, CompletionToken &&token) {
-    return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [w = weak_from_this(), channels = std::move(channels)](auto handler) mutable {
-            if (auto self = w.lock()) {
-                asio::dispatch(self->strand_, [self, channels = std::move(channels), handler = std::move(handler)]() mutable {
-                    auto ex_fallback = self->strand_.get_inner_executor();
-                    if (!self->ctx_) {
-                        detail::complete_on_associated(std::move(handler), ex_fallback, make_error(error_category::errc::not_connected));
-                        return;
-                    }
-                    size_t remaining = channels.size();
-                    if (remaining == 0) {
-                        detail::complete_on_associated(std::move(handler), ex_fallback, std::error_code{});
-                        return;
-                    }
-                    auto remaining_ptr = std::make_shared<size_t>(remaining);
-                    // capture handler and complete it on its associated executor exactly once
-                    auto hptr = std::make_shared<std::optional<decltype(handler)>>(std::move(handler));
-                    auto done = [remaining_ptr, hptr, ex_fallback](std::error_code ec) mutable {
-                        if (--*remaining_ptr == 0) {
-                            if (auto hop = std::move(*hptr)) {
-                                detail::complete_on_associated(std::move(*hop), ex_fallback, ec);
-                            }
-                        }
-                    };
-                    for (auto &ch : channels) {
-                        self->ch_.refc[ch]++;
-                        self->issue_sub("SUBSCRIBE", ch, done);
-                    }
-                });
-            }
-        },
-        token);
-}
-
-template <typename CompletionToken>
-auto RedisAsyncConnection::async_psubscribe(std::vector<std::string> patterns, CompletionToken &&token) {
-    return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [w = weak_from_this(), patterns = std::move(patterns)](auto handler) mutable {
-            if (auto self = w.lock()) {
-                asio::dispatch(self->strand_, [self, patterns = std::move(patterns), handler = std::move(handler)]() mutable {
-                    auto ex_fallback = self->strand_.get_inner_executor();
-                    if (!self->ctx_) {
-                        detail::complete_on_associated(std::move(handler), ex_fallback, make_error(error_category::errc::not_connected));
-                        return;
-                    }
-                    size_t remaining = patterns.size();
-                    if (remaining == 0) {
-                        detail::complete_on_associated(std::move(handler), ex_fallback, std::error_code{});
-                        return;
-                    }
-                    auto remaining_ptr = std::make_shared<size_t>(remaining);
-                    // capture handler and complete it on its associated executor exactly once
-                    auto hptr = std::make_shared<std::optional<decltype(handler)>>(std::move(handler));
-                    auto done = [remaining_ptr, hptr, ex_fallback](std::error_code ec) mutable {
-                        if (--*remaining_ptr == 0) {
-                            if (auto hop = std::move(*hptr)) {
-                                detail::complete_on_associated(std::move(*hop), ex_fallback, ec);
-                            }
-                        }
-                    };
-                    for (auto &p : patterns) {
-                        self->pch_.refc[p]++;
-                        self->issue_sub("PSUBSCRIBE", p, done);
-                    }
-                });
-            }
-        },
-        token);
-}
-
-template <typename CompletionToken>
-auto RedisAsyncConnection::async_unsubscribe(std::vector<std::string> channels, CompletionToken &&token) {
-    return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [w = weak_from_this(), channels = std::move(channels)](auto handler) mutable {
-            if (auto self = w.lock()) {
-                asio::dispatch(self->strand_, [self, channels = std::move(channels), handler = std::move(handler)]() mutable {
-                    auto ex_fallback = self->strand_.get_inner_executor();
-                    if (!self->ctx_) {
-                        detail::complete_on_associated(std::move(handler), ex_fallback, make_error(error_category::errc::not_connected));
-                        return;
-                    }
-                    size_t remaining = channels.size();
-                    if (remaining == 0) {
-                        detail::complete_on_associated(std::move(handler), ex_fallback, std::error_code{});
-                        return;
-                    }
-                    auto remaining_ptr = std::make_shared<size_t>(remaining);
-                    // capture handler and complete it on its associated executor exactly once
-                    auto hptr = std::make_shared<std::optional<decltype(handler)>>(std::move(handler));
-                    auto done = [remaining_ptr, hptr, ex_fallback](std::error_code ec) mutable {
-                        if (--*remaining_ptr == 0) {
-                            if (auto hop = std::move(*hptr)) {
-                                detail::complete_on_associated(std::move(*hop), ex_fallback, ec);
-                            }
-                        }
-                    };
-                    for (auto &ch : channels) {
-                        auto it = self->ch_.refc.find(ch);
-                        if (it != self->ch_.refc.end() && --(it->second) <= 0) {
-                            self->ch_.refc.erase(it);
-                            self->issue_unsub("UNSUBSCRIBE", ch, done);
-                        } else {
-                            // No active subscription, just complete
-                            detail::complete_on_associated(done, ex_fallback, std::error_code{});
-                        }
-                    }
-                });
-            }
-        },
-        token);
-}
-
-template <typename CompletionToken>
-auto RedisAsyncConnection::async_punsubscribe(std::vector<std::string> patterns, CompletionToken &&token) {
-    return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [w = weak_from_this(), patterns = std::move(patterns)](auto handler) mutable {
-            if (auto self = w.lock()) {
-                asio::dispatch(self->strand_, [self, patterns = std::move(patterns), handler = std::move(handler)]() mutable {
-                    auto ex_fallback = self->strand_.get_inner_executor();
-                    if (!self->ctx_) {
-                        detail::complete_on_associated(std::move(handler), ex_fallback, make_error(error_category::errc::not_connected));
-                        return;
-                    }
-                    size_t remaining = patterns.size();
-                    if (remaining == 0) {
-                        detail::complete_on_associated(std::move(handler), ex_fallback, std::error_code{});
-                        return;
-                    }
-                    auto remaining_ptr = std::make_shared<size_t>(remaining);
-                    // capture handler and complete it on its associated executor exactly once
-                    auto hptr = std::make_shared<std::optional<decltype(handler)>>(std::move(handler));
-                    auto done = [remaining_ptr, hptr, ex_fallback](std::error_code ec) mutable {
-                        if (--*remaining_ptr == 0) {
-                            if (auto hop = std::move(*hptr)) {
-                                detail::complete_on_associated(std::move(*hop), ex_fallback, ec);
-                            }
-                        }
-                    };
-                    for (auto &p : patterns) {
-                        auto it = self->pch_.refc.find(p);
-                        if (it != self->pch_.refc.end() && --(it->second) <= 0) {
-                            self->pch_.refc.erase(it);
-                            self->issue_unsub("PUNSUBSCRIBE", p, done);
-                        } else {
-                            // No active subscription, just complete
-                            detail::complete_on_associated(done, ex_fallback, std::error_code{});
-                        }
-                    }
-                });
-            }
-        },
-        token);
-}
-
-template <typename CompletionToken>
-auto RedisAsyncConnection::async_receive_publish(CompletionToken &&token) {
-    return pub_channel_.async_receive(std::forward<CompletionToken>(token));
-}
-
-template <typename CompletionToken>
-auto RedisAsyncConnection::async_command(const std::vector<std::string> &argv, CompletionToken &&token) {
-    using Sig = void(std::error_code, RedisValue);
-    return asio::async_initiate<CompletionToken, Sig>(
-        [w = weak_from_this(), argv](auto handler) mutable {
-            if (auto self = w.lock()) {
-                asio::dispatch(self->strand_, [self, argv, handler = std::move(handler)]() mutable {
-                    auto ex_fallback = self->strand_.get_inner_executor();
-                    if (!self->ctx_) {
-                        detail::complete_on_associated(std::move(handler), ex_fallback,
-                                                       make_error(error_category::errc::not_connected), RedisValue{});
-                        return;
-                    }
-                    if (!argv.empty())
-                        REDIS_TRACE_RT(self->log_, "command '{}' argc={} (payload elided)", argv.front(), argv.size());
-                    std::vector<const char *> cargv;
-                    cargv.reserve(argv.size());
-                    std::vector<size_t> alen;
-                    alen.reserve(argv.size());
-                    for (auto &s : argv) {
-                        cargv.push_back(s.data());
-                        alen.push_back(s.size());
-                    }
-                    using Handler = decltype(handler);
-                    struct Ctx {
-                        std::weak_ptr<RedisAsyncConnection> w;
-                        Handler h;
-                        boost::asio::any_io_executor ex;
-                    };
-                    auto ex_for_handler = boost::asio::get_associated_executor(handler, ex_fallback);
-                    auto *baton = new Ctx{self->weak_from_this(), std::move(handler), ex_for_handler};
-
-                    if (redisAsyncCommandArgv(self->ctx_, [](redisAsyncContext *, void *r, void *priv) {
-                            std::unique_ptr<Ctx> holder(static_cast<Ctx *>(priv));
-                            if (!r) {
-                                detail::complete_on_associated(std::move(holder->h), holder->ex,
-                                                               make_error(error_category::errc::protocol_error), RedisValue{});
-                                return;
-                            }
-                            detail::complete_on_associated(std::move(holder->h), holder->ex,
-                                                           std::error_code{}, RedisValue::fromRaw(static_cast<redisReply *>(r))); }, baton, (int)cargv.size(), cargv.data(), reinterpret_cast<const size_t *>(alen.data())) != REDIS_OK) {
-                        std::unique_ptr<Ctx> holder(baton);
-                        detail::complete_on_associated(std::move(holder->h), holder->ex,
-                                                       make_error(error_category::errc::protocol_error), RedisValue{});
-                    }
-                });
-            }
-        },
-        token);
-}
+#include "redis_async_impl.ipp"
 
 } // namespace redis_asio

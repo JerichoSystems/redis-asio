@@ -9,6 +9,7 @@
 
 #include <atomic>
 #include <cstdlib>
+#include <iostream>
 #include <string>
 #include <thread>
 #include <tuple>
@@ -43,6 +44,13 @@ static redis_asio::ConnectOptions opts_from_env() {
         o.tls.cert_file = cf;
     if (const char *kf = std::getenv("REDIS_KEY"))
         o.tls.key_file = kf;
+    return o;
+}
+
+static redis_asio::ConnectOptions bogus_opts() {
+    redis_asio::ConnectOptions o;
+    o.host = "256.256.256.256"; // invalid
+    o.port = 9999;
     return o;
 }
 
@@ -109,8 +117,6 @@ TEST(Integration, ConnectDoubleConnectWaiters) {
         auto opts = opts_from_env();
 
         // Start a waiter before connecting; it should resolve once connected.
-        asio::steady_timer gate(co_await asio::this_coro::executor);
-        gate.expires_after(0ms);
         bool waiter_done = false;
         asio::co_spawn(co_await asio::this_coro::executor, [c, &waiter_done]() -> asio::awaitable<void> {
             std::error_code ecw = co_await c->async_wait_connected(asio::use_awaitable);
@@ -122,6 +128,12 @@ TEST(Integration, ConnectDoubleConnectWaiters) {
         auto [ec1, already1] = co_await c->async_connect(opts, as_tuple(asio::use_awaitable));
         EXPECT_FALSE(ec1);
         EXPECT_FALSE(already1);
+
+        // Force a context switch to allow the waiter to run
+        asio::steady_timer gate(co_await asio::this_coro::executor);
+        gate.expires_after(0ms);
+        co_await gate.async_wait(asio::use_awaitable);
+
         EXPECT_TRUE(waiter_done); // the pre-registered waiter fired
 
         // connect again -> should complete immediately with already=true
@@ -333,17 +345,22 @@ TEST(Integration, ReconnectRestoresPsubscriptionsViaClientKill) {
         auto idstr = std::to_string(*idp);
 
         // Kill the subscriber connection from the controller connection
-         {
-          // Work around GCC coroutine ICE by avoiding mixed init-list with a std::string variable
-          std::vector<std::string> kill = {"CLIENT","KILL","ID", idstr};
-          std::tie(ec, rv) = co_await c_ctl->async_command(kill, as_tuple(asio::use_awaitable));
-        EXPECT_FALSE(ec);
+        {
+            // Work around GCC coroutine ICE by avoiding mixed init-list with a std::string variable
+            std::vector<std::string> kill = {"CLIENT", "KILL", "ID", idstr};
+            std::tie(ec, rv) = co_await c_ctl->async_command(kill, as_tuple(asio::use_awaitable));
+            EXPECT_FALSE(ec);
         }
 
         // Wait for disconnect then reconnect
         EXPECT_FALSE(co_await c_sub->async_wait_disconnected(asio::use_awaitable));
         // Give the client time to reconnect; if your impl exposes async_wait_connected, use it:
         EXPECT_FALSE(co_await c_sub->async_wait_connected(asio::use_awaitable));
+
+        // Small delay to ensure the server has processed the re-subscribe after reconnect
+        asio::steady_timer delay(co_await asio::this_coro::executor);
+        delay.expires_after(100ms);
+        co_await delay.async_wait(as_tuple(asio::use_awaitable));
 
         // After reconnect, publish and expect reception due to restored psubscription
         std::tie(ec, rv) = co_await c_ctl->async_command({"PUBLISH","auto.42","after-reconnect"}, as_tuple(asio::use_awaitable));
@@ -447,6 +464,86 @@ TEST(Cancel, WaitConnectedCanceledByStop) {
         asio::post(ex, [c]{ c->stop(); });
         auto [ec] = co_await c->async_wait_connected(as_tuple(asio::use_awaitable));
         EXPECT_EQ(ec, make_error(redis_asio::error_category::errc::stopped));
+    co_return; }, asio::detached);
+    ioc.run();
+}
+
+TEST(Cancel, WaitConnectedCanceledByCancellation) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "cancel.waitconcancel");
+    auto c = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+
+    asio::co_spawn(ioc, [c]() -> asio::awaitable<void> {
+        using boost::asio::as_tuple;
+        auto ex = co_await asio::this_coro::executor;
+        asio::steady_timer t(ex);
+        t.expires_after(10ms);
+        auto v = co_await (t.async_wait(as_tuple(asio::use_awaitable)) || c->async_wait_connected(as_tuple(asio::use_awaitable)));
+        EXPECT_TRUE(v.index() == 0);
+    co_return; }, asio::detached);
+    ioc.run();
+}
+
+TEST(Cancel, WaitConnectCanceledByTimeout) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "cancel.waitconcanceltime");
+    auto c = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+
+    asio::co_spawn(ioc, [c]() -> asio::awaitable<void> {
+        using boost::asio::as_tuple;
+        auto ex = co_await asio::this_coro::executor;
+
+        asio::steady_timer t(ex);
+        t.expires_after(10ms);
+        auto v = co_await (t.async_wait(as_tuple(asio::use_awaitable)) || c->async_connect(bogus_opts(), as_tuple(asio::use_awaitable)));
+        EXPECT_TRUE(v.index() == 0);
+        c->stop();
+    co_return; }, asio::detached);
+    ioc.run();
+}
+
+TEST(Cancel, WaitDisconnectedCanceledByCancellation) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "cancel.waitdisconcancel");
+    auto c = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+
+    asio::co_spawn(ioc, [c]() -> asio::awaitable<void> {
+        using boost::asio::as_tuple;
+        auto ex = co_await asio::this_coro::executor;
+
+        auto [ec, already] = co_await c->async_connect(opts_from_env(), as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(ec);
+        EXPECT_FALSE(already);
+        asio::steady_timer t(ex);
+        t.expires_after(10ms);
+        auto v = co_await (t.async_wait(as_tuple(asio::use_awaitable)) || c->async_wait_disconnected(as_tuple(asio::use_awaitable)));
+        EXPECT_TRUE(v.index() == 0);
+        c->stop();
+    co_return; }, asio::detached);
+    ioc.run();
+}
+
+TEST(Cancel, WaitPublishResponseCanceledByCancellation) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "cancel.waitreceivecancel");
+    auto c = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+
+    asio::co_spawn(ioc, [c]() -> asio::awaitable<void> {
+        using boost::asio::as_tuple;
+        auto ex = co_await asio::this_coro::executor;
+
+        auto [ec, already] = co_await c->async_connect(opts_from_env(), as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(ec);
+        EXPECT_FALSE(already);
+        asio::steady_timer t(ex);
+        t.expires_after(10ms);
+        auto v = co_await (t.async_wait(as_tuple(asio::use_awaitable)) || c->async_receive_publish(as_tuple(asio::use_awaitable)));
+        EXPECT_TRUE(v.index() == 0);
+        c->stop();
     co_return; }, asio::detached);
     ioc.run();
 }
