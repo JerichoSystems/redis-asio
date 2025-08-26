@@ -464,19 +464,38 @@ TEST(Cancel, WaitConnectedCanceledByStop) {
 TEST(Cancel, WaitConnectedCanceledByCancellation) {
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
-    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "cancel.waitcancel");
+    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "cancel.waitconcancel");
     auto c = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
 
     asio::co_spawn(ioc, [c]() -> asio::awaitable<void> {
         using boost::asio::as_tuple;
         auto ex = co_await asio::this_coro::executor;
-        // asio::post(ex, [c]{ c->stop(); });
         asio::steady_timer t(ex);
         t.expires_after(10ms);
         auto v = co_await (t.async_wait(as_tuple(asio::use_awaitable)) || c->async_wait_connected(as_tuple(asio::use_awaitable)));
         EXPECT_TRUE(v.index() == 0);
-        // auto [ec] = co_await c->async_wait_connected(as_tuple(asio::use_awaitable));
-        // EXPECT_EQ(ec, make_error(redis_asio::error_category::errc::stopped));
+    co_return; }, asio::detached);
+    ioc.run();
+}
+
+TEST(Cancel, WaitDisconnectedCanceledByCancellation) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "cancel.waitdisconcancel");
+    auto c = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+
+    asio::co_spawn(ioc, [c]() -> asio::awaitable<void> {
+        using boost::asio::as_tuple;
+        auto ex = co_await asio::this_coro::executor;
+
+        auto [ec, already] = co_await c->async_connect(opts_from_env(), as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(ec);
+        EXPECT_FALSE(already);
+        asio::steady_timer t(ex);
+        t.expires_after(10ms);
+        auto v = co_await (t.async_wait(as_tuple(asio::use_awaitable)) || c->async_wait_disconnected(as_tuple(asio::use_awaitable)));
+        EXPECT_TRUE(v.index() == 0);
+        c->stop();
     co_return; }, asio::detached);
     ioc.run();
 }

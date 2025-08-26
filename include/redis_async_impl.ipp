@@ -41,6 +41,7 @@ auto RedisAsyncConnection::async_wait_connected(CompletionToken &&token) {
         [w = weak_from_this()](auto handler) {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, handler = std::move(handler)]() mutable {
+                    auto slot = asio::get_associated_cancellation_slot(handler);
                     if (self->is_connected()) {
                         detail::complete_on_associated(std::move(handler), self->strand_, std::error_code{});
                         return;
@@ -50,9 +51,24 @@ auto RedisAsyncConnection::async_wait_connected(CompletionToken &&token) {
                         return;
                     }
                     auto ex = self->strand_;
-                    self->add_connect_waiter([h = std::move(handler), ex](std::error_code ec) mutable {
+                    auto id = self->add_connect_waiter([h = std::move(handler), ex](std::error_code ec) mutable {
                         detail::complete_on_associated(std::move(h), ex, ec);
                     });
+                    // Wire user cancellation → erase + complete aborted
+                    if (slot.is_connected() && !slot.has_handler()) {
+                        slot.assign([w = self->weak_from_this(), id](asio::cancellation_type_t t) {
+                            if (t == asio::cancellation_type::none)
+                                return;
+                            if (auto s = w.lock()) {
+                                asio::dispatch(s->strand_, [s, id]() mutable {
+                                    if (auto oh = s->erase_connect_waiter(id)) {
+                                        detail::complete_on_associated(
+                                            std::move(oh), s->strand_, make_error(error_category::errc::stopped));
+                                    }
+                                });
+                            }
+                        });
+                    }
                 });
             } else {
                 // Connection object already destroyed; complete with operation_aborted.
@@ -68,6 +84,7 @@ auto RedisAsyncConnection::async_wait_disconnected(CompletionToken &&token) {
         [w = weak_from_this()](auto handler) {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, handler = std::move(handler)]() mutable {
+                    auto slot = asio::get_associated_cancellation_slot(handler);
                     if (!self->is_connected()) {
                         detail::complete_on_associated(std::move(handler), self->strand_, std::error_code{});
                         return;
@@ -77,9 +94,25 @@ auto RedisAsyncConnection::async_wait_disconnected(CompletionToken &&token) {
                         return;
                     }
                     auto ex = self->strand_;
-                    self->add_disconnect_waiter([h = std::move(handler), ex](std::error_code ec) mutable {
+                    auto id = self->add_disconnect_waiter([h = std::move(handler), ex](std::error_code ec) mutable {
                         detail::complete_on_associated(std::move(h), ex, ec);
                     });
+
+                    // Wire user cancellation → erase + complete aborted
+                    if (slot.is_connected() && !slot.has_handler()) {
+                        slot.assign([w = self->weak_from_this(), id](asio::cancellation_type_t t) {
+                            if (t == asio::cancellation_type::none)
+                                return;
+                            if (auto s = w.lock()) {
+                                asio::dispatch(s->strand_, [s, id]() mutable {
+                                    if (auto oh = s->erase_disconnect_waiter(id)) {
+                                        detail::complete_on_associated(
+                                            std::move(oh), s->strand_, make_error(error_category::errc::stopped));
+                                    }
+                                });
+                            }
+                        });
+                    }
                 });
             } else {
                 // Connection object already destroyed; complete with operation_aborted.
