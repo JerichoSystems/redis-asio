@@ -14,7 +14,7 @@ else()
     vcpkg_from_github(
         OUT_SOURCE_PATH SOURCE_PATH
         REPO jerichosystems/redis-asio
-        REF v0.1.2
+        REF v0.1.4
         SHA512 0 # fill when publishing a tag
     )
 endif()
@@ -46,6 +46,11 @@ if("tests" IN_LIST FEATURES)
     # Ensure the target exists in your CMake when REDIS_ASIO_BUILD_TESTS=ON
     # vcpkg_cmake_build(TARGETS redis_asio_tests)
     vcpkg_copy_tools(TOOL_NAMES redis_asio_tests SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin/ AUTO_CLEAN)
+    vcpkg_copy_tools(TOOL_NAMES redis_async_tests SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin/ AUTO_CLEAN)
+    vcpkg_copy_tools(TOOL_NAMES redis_log_on_tests SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin/ AUTO_CLEAN)
+    vcpkg_copy_tools(TOOL_NAMES redis_log_off_tests SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin/ AUTO_CLEAN)
+    vcpkg_copy_tools(TOOL_NAMES redis_log_rt_tests SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin/ AUTO_CLEAN)
+    vcpkg_copy_tools(TOOL_NAMES redis_value_tests SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin/ AUTO_CLEAN)
 endif()
 
 if("examples" IN_LIST FEATURES)

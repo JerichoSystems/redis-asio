@@ -42,7 +42,7 @@ auto RedisAsyncConnection::async_wait_connected(CompletionToken &&token) {
                         detail::complete_on_associated(std::move(handler), self->strand_.get_inner_executor(), std::error_code{});
                         return;
                     }
-                    if(self->stopping_) {
+                    if (self->stopping_) {
                         detail::complete_on_associated(std::move(handler), self->strand_.get_inner_executor(), make_error(error_category::errc::stopped));
                         return;
                     }
@@ -67,7 +67,7 @@ auto RedisAsyncConnection::async_wait_disconnected(CompletionToken &&token) {
                         detail::complete_on_associated(std::move(h), self->strand_.get_inner_executor(), std::error_code{});
                         return;
                     }
-                    if(self->stopping_) {
+                    if (self->stopping_) {
                         detail::complete_on_associated(std::move(handler), self->strand_.get_inner_executor(), make_error(error_category::errc::stopped));
                         return;
                     }

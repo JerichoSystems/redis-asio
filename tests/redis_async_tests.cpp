@@ -13,6 +13,7 @@
 #include <thread>
 #include <tuple>
 #include <variant>
+#include <iostream>
 
 using namespace std::chrono_literals;
 namespace asio = boost::asio;
@@ -109,8 +110,6 @@ TEST(Integration, ConnectDoubleConnectWaiters) {
         auto opts = opts_from_env();
 
         // Start a waiter before connecting; it should resolve once connected.
-        asio::steady_timer gate(co_await asio::this_coro::executor);
-        gate.expires_after(0ms);
         bool waiter_done = false;
         asio::co_spawn(co_await asio::this_coro::executor, [c, &waiter_done]() -> asio::awaitable<void> {
             std::error_code ecw = co_await c->async_wait_connected(asio::use_awaitable);
@@ -122,6 +121,12 @@ TEST(Integration, ConnectDoubleConnectWaiters) {
         auto [ec1, already1] = co_await c->async_connect(opts, as_tuple(asio::use_awaitable));
         EXPECT_FALSE(ec1);
         EXPECT_FALSE(already1);
+
+        // Force a context switch to allow the waiter to run
+        asio::steady_timer gate(co_await asio::this_coro::executor);
+        gate.expires_after(0ms);
+        co_await gate.async_wait(asio::use_awaitable);
+
         EXPECT_TRUE(waiter_done); // the pre-registered waiter fired
 
         // connect again -> should complete immediately with already=true
@@ -447,6 +452,26 @@ TEST(Cancel, WaitConnectedCanceledByStop) {
         asio::post(ex, [c]{ c->stop(); });
         auto [ec] = co_await c->async_wait_connected(as_tuple(asio::use_awaitable));
         EXPECT_EQ(ec, make_error(redis_asio::error_category::errc::stopped));
+    co_return; }, asio::detached);
+    ioc.run();
+}
+
+TEST(Cancel, WaitConnectedCanceledByCancellation) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "cancel.waitcancel");
+    auto c = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+
+    asio::co_spawn(ioc, [c]() -> asio::awaitable<void> {
+        using boost::asio::as_tuple;
+        auto ex = co_await asio::this_coro::executor;
+        // asio::post(ex, [c]{ c->stop(); });
+        asio::steady_timer t(ex);
+        t.expires_after(10ms);
+        auto v = co_await (t.async_wait(as_tuple(asio::use_awaitable)) || c->async_wait_connected(as_tuple(asio::use_awaitable)));
+        EXPECT_TRUE(v.index() == 0);
+        // auto [ec] = co_await c->async_wait_connected(as_tuple(asio::use_awaitable));
+        // EXPECT_EQ(ec, make_error(redis_asio::error_category::errc::stopped));
     co_return; }, asio::detached);
     ioc.run();
 }
