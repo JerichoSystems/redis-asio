@@ -1,6 +1,9 @@
-#include "redis_value.hpp"
 #include <gtest/gtest.h>
 #include <hiredis/hiredis.h>
+
+#include "redis_async.hpp"
+#include "redis_log.hpp"
+#include "redis_value.hpp"
 
 using redis_asio::RedisValue;
 
