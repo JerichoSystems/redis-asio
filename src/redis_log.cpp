@@ -1,33 +1,68 @@
 #include "redis_log.hpp"
-#include <iostream>
-#include <syncstream>   // C++20: atomic chunked writes
+
 #include <atomic>
-#include <cstdlib>      // std::getenv
-#include <mutex>        // std::once_flag (Windows VT setup)
+#include <cstdlib> // std::getenv
+#include <iostream>
+#include <mutex> // once_flag, mutex (fallback sink)
+#include <string>
+#include <string_view>
+
+#if defined(__has_include)
+    #if __has_include(<syncstream>)
+        #include <syncstream>
+        #if defined(__cpp_lib_syncbuf) && (__cpp_lib_syncbuf >= 201803L)
+            #define REDIS_HAVE_SYNCBUF 1
+        #endif
+    #endif
+#endif
 
 #if defined(_WIN32)
-  #include <windows.h>
-  #include <io.h>
-  #define ISATTY _isatty
-  #define FILENO _fileno
+    #include <io.h>
+    #include <windows.h>
+    #define ISATTY _isatty
+    #define FILENO _fileno
 #else
-  #include <unistd.h>
-  #define ISATTY isatty
-  #define FILENO fileno
+    #include <unistd.h>
+    #define ISATTY isatty
+    #define FILENO fileno
 #endif
 
 namespace redis_asio {
 namespace {
 
+// --- small sink that guarantees atomic writes without building a std::string ---
+struct Sink {
+    template <class F>
+    void write(F &&f) noexcept {
+#if defined(REDIS_HAVE_SYNCBUF)
+        std::osyncstream out(std::clog); // atomic chunking
+        f(out);
+        // flush on ~osyncstream
+#else
+        static std::mutex m;
+        std::lock_guard<std::mutex> lk(m);
+        f(std::clog);
+        std::clog.flush();
+#endif
+    }
+};
+
 static constexpr std::string_view level_name(Logger::Level l) noexcept {
     switch (l) {
-        case Logger::Level::trace:    return "trace";
-        case Logger::Level::debug:    return "debug";
-        case Logger::Level::info:     return "info";
-        case Logger::Level::warn:     return "warn";
-        case Logger::Level::err:      return "err";
-        case Logger::Level::critical: return "critical";
-        case Logger::Level::off:      return "off";
+    case Logger::Level::trace:
+        return "trace";
+    case Logger::Level::debug:
+        return "debug";
+    case Logger::Level::info:
+        return "info";
+    case Logger::Level::warn:
+        return "warn";
+    case Logger::Level::err:
+        return "err";
+    case Logger::Level::critical:
+        return "critical";
+    case Logger::Level::off:
+        return "off";
     }
     return "unknown";
 }
@@ -40,25 +75,26 @@ struct NullLogger final : Logger {
 struct ClogLogger final : Logger {
     explicit ClogLogger(Level min, std::string name)
         : min_(min), name_(std::move(name)), color_(should_colorize()) {
-    #if defined(_WIN32)
-        if (color_) enable_win_vt();
-    #endif
+#if defined(_WIN32)
+        if (color_)
+            enable_win_vt();
+#endif
     }
 
     void log(Level lvl, std::string_view msg) noexcept override {
-        if (lvl < min_.load(std::memory_order_relaxed)) return;
+        if (lvl < min_.load(std::memory_order_relaxed))
+            return;
 
-        std::osyncstream out(std::clog);
-        if (color_) {
-            const auto c = color_codes(lvl);
-            // Color only the level tag for readability; leave message uncolored.
-            out << '[' << name_ << "] "
-                << c.open << '[' << level_name(lvl) << ']' << c.close
-                << ' ' << msg << '\n';
-        } else {
-            out << '[' << name_ << "] [" << level_name(lvl) << "] " << msg << '\n';
-        }
-        // flush on destruction of osyncstream
+        sink_.write([&](std::ostream &out) {
+            if (color_) {
+                const auto c = color_codes(lvl);
+                out << '[' << name_ << "] "
+                    << c.open << '[' << level_name(lvl) << ']' << c.close
+                    << ' ' << msg << '\n';
+            } else {
+                out << '[' << name_ << "] [" << level_name(lvl) << "] " << msg << '\n';
+            }
+        });
     }
 
     bool should_log(Level lvl) const noexcept override {
@@ -69,30 +105,43 @@ struct ClogLogger final : Logger {
 
     // --- color support ---
     static bool should_colorize() noexcept {
-    #ifdef REDIS_LOG_FORCE_COLOR
+#ifdef REDIS_LOG_FORCE_COLOR
         return true;
-    #endif
-    #ifdef REDIS_LOG_DISABLE_COLOR
+#endif
+#ifdef REDIS_LOG_DISABLE_COLOR
         return false;
-    #endif
-        if (std::getenv("NO_COLOR")) return false; // https://no-color.org/
+#endif
+        if (std::getenv("NO_COLOR"))
+            return false; // https://no-color.org/
         bool tty = ISATTY(FILENO(stderr));
-        if (!tty) tty = ISATTY(FILENO(stdout));
-        const char* term = std::getenv("TERM");
-        if (term && std::string_view(term) == "dumb") return false;
+        if (!tty)
+            tty = ISATTY(FILENO(stdout));
+        const char *term = std::getenv("TERM");
+        if (term && std::string_view(term) == "dumb")
+            return false;
         return tty;
     }
 
-    struct AnsiPair { const char* open; const char* close; };
+    struct AnsiPair {
+        const char *open;
+        const char *close;
+    };
     static constexpr AnsiPair color_codes(Level lvl) noexcept {
         switch (lvl) {
-            case Level::trace:    return {"[2m",    "[0m"}; // dim
-            case Level::debug:    return {"[36m",   "[0m"}; // cyan
-            case Level::info:     return {"[32m",   "[0m"}; // green
-            case Level::warn:     return {"[33m",   "[0m"}; // yellow
-            case Level::err:      return {"[31m",   "[0m"}; // red
-            case Level::critical: return {"[1;31m", "[0m"}; // bold red
-            case Level::off:      break;
+        case Level::trace:
+            return {"\x1b[2m", "\x1b[0m"}; // dim
+        case Level::debug:
+            return {"\x1b[36m", "\x1b[0m"}; // cyan
+        case Level::info:
+            return {"\x1b[32m", "\x1b[0m"}; // green
+        case Level::warn:
+            return {"\x1b[33m", "\x1b[0m"}; // yellow
+        case Level::err:
+            return {"\x1b[31m", "\x1b[0m"}; // red
+        case Level::critical:
+            return {"\x1b[1;31m", "\x1b[0m"}; // bold red
+        case Level::off:
+            break;
         }
         return {"", ""};
     }
@@ -100,23 +149,26 @@ struct ClogLogger final : Logger {
 #if defined(_WIN32)
     static void enable_win_vt() noexcept {
         static std::once_flag once;
-        std::call_once(once, []{
+        std::call_once(once, [] {
             HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
-            if (h == INVALID_HANDLE_VALUE) return;
+            if (h == INVALID_HANDLE_VALUE)
+                return;
             DWORD mode = 0;
-            if (!GetConsoleMode(h, &mode)) return;
+            if (!GetConsoleMode(h, &mode))
+                return;
             mode |= ENABLE_VIRTUAL_TERMINAL_PROCESSING;
             SetConsoleMode(h, mode);
         });
     }
 #endif
 
+    Sink sink_;
     std::atomic<Level> min_;
     std::string name_;
     bool color_;
 };
 
-} // namespace (internal)
+} // namespace
 
 std::shared_ptr<Logger> make_null_logger() {
     static auto s = std::make_shared<NullLogger>();
