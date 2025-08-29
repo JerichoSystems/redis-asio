@@ -392,10 +392,11 @@ TEST(CompletionTokens, AsyncCommand_UseFuture) {
     using boost::asio::as_tuple;
     std::future<std::tuple<std::error_code, redis_asio::RedisValue>> fut =
         c->async_command({"PING"}, as_tuple(asio::use_future));
-    std::jthread t1([&] { ioc.poll(); });
+    std::thread t1([&] { ioc.poll(); });
     // Not connected -> should error
     auto [ec, v] = fut.get();
     EXPECT_TRUE(ec);
+    t1.join();
 }
 static asio::awaitable<void>
 echo_once(std::shared_ptr<redis_asio::RedisAsyncConnection> c,
@@ -442,8 +443,8 @@ TEST(Concurrency, StrandSerializesHandlersEvenWithTwoThreads) {
     c->stop();
     co_return; }, asio::detached);
 
-    std::jthread t1([&] { ioc.run(); });
-    std::jthread t2([&] { ioc.run(); });
+    std::thread t1([&] { ioc.run(); });
+    std::thread t2([&] { ioc.run(); });
     t1.join();
     t2.join();
 
