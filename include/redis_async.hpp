@@ -148,24 +148,26 @@ inline void complete(H &h, Args &&...args) {
 // }
 
 // Route completion to the handler's associated executor.
-// DECAY-COPY the arguments so no dangling refs cross the boundary.
 template <class H, class FallbackExecutor, class... Args>
 inline void complete_on_associated(H &&h, const FallbackExecutor &fallback, Args &&...args) {
-    using Handler = std::decay_t<H>;
-    Handler h2 = std::forward<H>(h);
+    // get traits from the (possibly lvalue) handler
+    auto ex = boost::asio::get_associated_executor(h, fallback);
+    auto alloc = boost::asio::get_associated_allocator(h);
 
-    // Compute traits from the concrete handler instance
-    auto ex = boost::asio::get_associated_executor(h2, fallback);
-    auto alloc = boost::asio::get_associated_allocator(h2);
+    // decay-copy args so no dangling refs cross the boundary
+    using Tup = std::tuple<std::decay_t<Args>...>;
+    Tup tup(std::forward<Args>(args)...);
 
-    auto tup = std::make_tuple(std::decay_t<Args>(std::forward<Args>(args))...);
-    auto thunk = [h3 = std::move(h2), tup = std::move(tup)]() mutable {
-        std::apply([&](auto &&...as) { complete(h3, std::forward<decltype(as)>(as)...); }, tup);
+    // move the (possibly move-only) handler into the thunk
+    auto thunk = [h2 = std::move(h), tup = std::move(tup)]() mutable {
+        std::apply([&](auto &&...as) {
+            complete(h2, std::forward<decltype(as)>(as)...);
+        },
+                   tup);
     };
 
     boost::asio::dispatch(ex, boost::asio::bind_allocator(alloc, std::move(thunk)));
 }
-
 } // namespace detail
 
 /**

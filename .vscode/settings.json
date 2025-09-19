@@ -15,7 +15,12 @@
         "thread": "cpp",
         "regex": "cpp",
         "cmath": "cpp",
-        "valarray": "cpp"
+        "valarray": "cpp",
+        "chrono": "cpp",
+        "optional": "cpp",
+        "string_view": "cpp",
+        "unordered_map": "cpp",
+        "atomic": "cpp"
     },
     "circleci.persistedProjectSelection": [
         "gh/JerichoSystems/redis-asio"
