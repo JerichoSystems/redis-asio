@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(redis_asio VERSION 0.1.5 LANGUAGES C CXX)
+project(redis_asio VERSION 0.1.6 LANGUAGES C CXX)
 
 if(POLICY CMP0167)
     # Keep FindBoost module behavior and silence the dev warning.

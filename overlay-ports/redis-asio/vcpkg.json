@@ -1,6 +1,6 @@
 {
     "name": "redis-asio",
-    "version-string": "0.1.5",
+    "version-string": "0.1.6",
     "description": "Async Redis client on Boost.Asio + hiredis.",
     "homepage": "https://github.com/JerichoSystems/redis-asio",
     "default-features": [],
