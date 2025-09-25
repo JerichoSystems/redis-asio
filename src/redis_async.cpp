@@ -201,9 +201,7 @@ void RedisAsyncConnection::schedule_reconnect() {
 }
 
 void RedisAsyncConnection::on_connected() {
-    connected_.store(true, std::memory_order_relaxed);
-    backoff_ = {};
-    REDIS_DEBUG_RT(log_, "connected to {}:{} TLS={}", opts_.host, opts_.port, opts_.tls.use_tls);
+    REDIS_DEBUG_RT(log_, "socket connected to {}:{} TLS={}", opts_.host, opts_.port, opts_.tls.use_tls);
     send_handshake_hello();
 }
 
@@ -364,12 +362,13 @@ void RedisAsyncConnection::send_handshake_hello() {
             return;
           }
           self->hello_summary_ = std::move(summary);
+          self->connected_.store(true, std::memory_order_relaxed);
+          self->backoff_ = {};
           REDIS_TRACE_RT(self->log_, "HELLO ok: {}", self->hello_summary_);
           self->restore_subscriptions();
           self->start_keepalive();
           auto waiters = std::move(self->connect_waiters_); self->connect_waiters_.clear();
-          for (auto& [id, h] : waiters) { 
-            //asio::post(self->strand_, [hh = std::move(h)]() mutable { hh({}); }); 
+          for (auto& [id, h] : waiters) {
             detail::complete_on_associated(std::move(h), self->strand_, std::error_code{});
         }
         }); }, nullptr, (int)cargv.size(), cargv.data(), reinterpret_cast<const size_t *>(alen.data())) != REDIS_OK) {

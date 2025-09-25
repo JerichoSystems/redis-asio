@@ -1,9 +1,9 @@
 #include <gtest/gtest.h>
-#include <vector>
-#include <string>
-#include <sstream>
 #include <iostream>
 #include <memory>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #include "redis_log.hpp"
 
@@ -23,7 +23,7 @@ struct TestLogger final : Logger {
     Level min_;
 };
 
-} // anonymous
+} // namespace
 
 TEST(LoggingBasic_On, FormatsAndWritesWhenEnabled) {
     auto lg = std::make_shared<TestLogger>(Logger::Level::trace);
@@ -51,7 +51,7 @@ TEST(LoggingDynamicLevel_On, UsesRuntimeLevelAndThreshold) {
 
 TEST(LoggingPointerKinds_On, RawPointerAndSharedPtrWork) {
     TestLogger raw;
-    TestLogger* p = &raw;
+    TestLogger *p = &raw;
     infof(p, "raw {}", 1);
     ASSERT_EQ(raw.entries.size(), 1u);
     EXPECT_EQ(raw.entries[0].second, std::string("raw 1"));
@@ -72,7 +72,7 @@ TEST(Macros_On, REDIS_LOGF_ForwardsDynamicLevel) {
 TEST(Macros_On, DebugEvaluatedWhenEnabled) {
     auto lg = std::make_shared<TestLogger>(Logger::Level::trace);
     int side = 0;
-    auto inc = [&]{ ++side; return 42; };
+    auto inc = [&] { ++side; return 42; };
     REDIS_DEBUG(lg, "side {}", inc());
     EXPECT_EQ(side, 1);
     ASSERT_EQ(lg->entries.size(), 1u);
@@ -83,7 +83,7 @@ TEST(Macros_On, DebugEvaluatedWhenEnabled) {
 TEST(ClogLogger_On, EmitsAnsiSequencesWhenForced) {
     auto lg = make_clog_logger(Logger::Level::info, "test");
     std::ostringstream os;
-    auto* old = std::clog.rdbuf(os.rdbuf());
+    auto *old = std::clog.rdbuf(os.rdbuf());
 
     REDIS_INFO(lg, "color {}", 7);
 

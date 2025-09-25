@@ -1,14 +1,12 @@
 #pragma once
 
-#include "redis_async.hpp"
-
 // Implementations for templates that must remain header-visible
 
 template <typename CompletionToken>
 auto RedisAsyncConnection::async_connect(ConnectOptions opts, CompletionToken &&token) {
     using Sig = void(std::error_code, bool);
     return asio::async_initiate<CompletionToken, Sig>(
-        [w = weak_from_this(), opts = std::move(opts)](auto handler) mutable {
+        asio::bind_executor(strand_.get_inner_executor(), [w = weak_from_this(), opts = std::move(opts)](auto handler) mutable {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, opts = std::move(opts), handler = std::move(handler)]() mutable {
                     auto slot = asio::get_associated_cancellation_slot(handler);
@@ -47,14 +45,14 @@ auto RedisAsyncConnection::async_connect(ConnectOptions opts, CompletionToken &&
                 // Connection object already destroyed; complete with operation_aborted.
                 detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped), false);
             }
-        },
+        }),
         token);
 }
 
 template <typename CompletionToken>
 auto RedisAsyncConnection::async_wait_connected(CompletionToken &&token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [w = weak_from_this()](auto handler) {
+        asio::bind_executor(strand_.get_inner_executor(), [w = weak_from_this()](auto handler) {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, handler = std::move(handler)]() mutable {
                     auto slot = asio::get_associated_cancellation_slot(handler);
@@ -90,14 +88,14 @@ auto RedisAsyncConnection::async_wait_connected(CompletionToken &&token) {
                 // Connection object already destroyed; complete with operation_aborted.
                 detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped));
             }
-        },
+        }),
         token);
 }
 
 template <typename CompletionToken>
 auto RedisAsyncConnection::async_wait_disconnected(CompletionToken &&token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [w = weak_from_this()](auto handler) {
+        asio::bind_executor(strand_.get_inner_executor(), [w = weak_from_this()](auto handler) {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, handler = std::move(handler)]() mutable {
                     auto slot = asio::get_associated_cancellation_slot(handler);
@@ -134,18 +132,18 @@ auto RedisAsyncConnection::async_wait_disconnected(CompletionToken &&token) {
                 // Connection object already destroyed; complete with operation_aborted.
                 detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped));
             }
-        },
+        }),
         token);
 }
 
 template <typename CompletionToken>
 auto RedisAsyncConnection::async_subscribe(std::vector<std::string> channels, CompletionToken &&token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [w = weak_from_this(), channels = std::move(channels)](auto handler) mutable {
+        asio::bind_executor(strand_.get_inner_executor(), [w = weak_from_this(), channels = std::move(channels)](auto handler) mutable {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, channels = std::move(channels), handler = std::move(handler)]() mutable {
                     auto ex_fallback = self->strand_;
-                    if (!self->ctx_) {
+                    if (!self->ctx_ || !self->is_connected()) {
                         detail::complete_on_associated(std::move(handler), ex_fallback, make_error(error_category::errc::not_connected));
                         return;
                     }
@@ -173,18 +171,18 @@ auto RedisAsyncConnection::async_subscribe(std::vector<std::string> channels, Co
                 // Connection object already destroyed; complete with operation_aborted.
                 detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped));
             }
-        },
+        }),
         token);
 }
 
 template <typename CompletionToken>
 auto RedisAsyncConnection::async_psubscribe(std::vector<std::string> patterns, CompletionToken &&token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [w = weak_from_this(), patterns = std::move(patterns)](auto handler) mutable {
+        asio::bind_executor(strand_.get_inner_executor(), [w = weak_from_this(), patterns = std::move(patterns)](auto handler) mutable {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, patterns = std::move(patterns), handler = std::move(handler)]() mutable {
                     auto ex_fallback = self->strand_;
-                    if (!self->ctx_) {
+                    if (!self->ctx_ || !self->is_connected()) {
                         detail::complete_on_associated(std::move(handler), ex_fallback, make_error(error_category::errc::not_connected));
                         return;
                     }
@@ -212,18 +210,18 @@ auto RedisAsyncConnection::async_psubscribe(std::vector<std::string> patterns, C
                 // Connection object already destroyed; complete with operation_aborted.
                 detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped));
             }
-        },
+        }),
         token);
 }
 
 template <typename CompletionToken>
 auto RedisAsyncConnection::async_unsubscribe(std::vector<std::string> channels, CompletionToken &&token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [w = weak_from_this(), channels = std::move(channels)](auto handler) mutable {
+        asio::bind_executor(strand_.get_inner_executor(), [w = weak_from_this(), channels = std::move(channels)](auto handler) mutable {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, channels = std::move(channels), handler = std::move(handler)]() mutable {
                     auto ex_fallback = self->strand_;
-                    if (!self->ctx_) {
+                    if (!self->ctx_ || !self->is_connected()) {
                         detail::complete_on_associated(std::move(handler), ex_fallback, make_error(error_category::errc::not_connected));
                         return;
                     }
@@ -257,18 +255,18 @@ auto RedisAsyncConnection::async_unsubscribe(std::vector<std::string> channels, 
                 // Connection object already destroyed; complete with operation_aborted.
                 detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped));
             }
-        },
+        }),
         token);
 }
 
 template <typename CompletionToken>
 auto RedisAsyncConnection::async_punsubscribe(std::vector<std::string> patterns, CompletionToken &&token) {
     return asio::async_initiate<CompletionToken, void(std::error_code)>(
-        [w = weak_from_this(), patterns = std::move(patterns)](auto handler) mutable {
+        asio::bind_executor(strand_.get_inner_executor(), [w = weak_from_this(), patterns = std::move(patterns)](auto handler) mutable {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, patterns = std::move(patterns), handler = std::move(handler)]() mutable {
                     auto ex_fallback = self->strand_;
-                    if (!self->ctx_) {
+                    if (!self->ctx_ || !self->is_connected()) {
                         detail::complete_on_associated(std::move(handler), ex_fallback, make_error(error_category::errc::not_connected));
                         return;
                     }
@@ -302,7 +300,7 @@ auto RedisAsyncConnection::async_punsubscribe(std::vector<std::string> patterns,
                 // Connection object already destroyed; complete with operation_aborted.
                 detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped));
             }
-        },
+        }),
         token);
 }
 
@@ -315,11 +313,11 @@ template <typename CompletionToken>
 auto RedisAsyncConnection::async_command(const std::vector<std::string> &argv, CompletionToken &&token) {
     using Sig = void(std::error_code, RedisValue);
     return asio::async_initiate<CompletionToken, Sig>(
-        [w = weak_from_this(), argv](auto handler) mutable {
+        asio::bind_executor(strand_.get_inner_executor(), [w = weak_from_this(), argv](auto handler) mutable {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, argv, handler = std::move(handler)]() mutable {
                     auto ex_fallback = self->strand_;
-                    if (!self->ctx_) {
+                    if (!self->ctx_ || !self->is_connected()) {
                         detail::complete_on_associated(std::move(handler), ex_fallback,
                                                        make_error(error_category::errc::not_connected), RedisValue{});
                         return;
@@ -361,6 +359,6 @@ auto RedisAsyncConnection::async_command(const std::vector<std::string> &argv, C
                 // Connection object already destroyed; complete with operation_aborted.
                 detail::complete_on_associated(std::move(handler), boost::asio::system_executor{}, make_error(error_category::errc::stopped), RedisValue{});
             }
-        },
+        }),
         token);
 }

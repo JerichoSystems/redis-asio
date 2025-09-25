@@ -132,20 +132,18 @@ inline void complete(H &h, Args &&...args) {
     }
 }
 
-// // Route completion to the handler's associated executor, but DECAY-COPY
-// // the arguments so no dangling refs cross the post/dispatch boundary.
-// template <class H, class... Args>
-// inline void complete_on_associated(H &&h, const asio::any_io_executor &fallback, Args &&...args) {
-//     using Handler = std::decay_t<H>;
-//     Handler h2 = std::forward<H>(h);
-//     auto ex = asio::get_associated_executor(h2, fallback);
-//     auto alloc = asio::get_associated_allocator(h2);
-//     auto tup = std::make_tuple(std::decay_t<Args>(std::forward<Args>(args))...);
-//     auto fn = [h3 = std::move(h2), tup = std::move(tup)]() mutable {
-//         std::apply([&](auto &&...as) { detail::complete(h3, std::forward<decltype(as)>(as)...); }, tup);
-//     };
-//     asio::post(ex, asio::bind_allocator(alloc, std::move(fn)));
-// }
+// post when it’s legal and otherwise falls back to dispatch
+template <class Ex, class F>
+void post_or_dispatch(const Ex &ex, F &&f) {
+    using namespace boost::asio;
+    if constexpr (is_executor<Ex>::value ||
+                  (execution::is_executor<Ex>::value &&
+                   asio::can_require<Ex, execution::blocking_t::never_t>::value)) {
+        post(ex, std::forward<F>(f));
+    } else {
+        dispatch(ex, std::forward<F>(f));
+    }
+}
 
 // Route completion to the handler's associated executor.
 template <class H, class FallbackExecutor, class... Args>
@@ -166,7 +164,7 @@ inline void complete_on_associated(H &&h, const FallbackExecutor &fallback, Args
                    tup);
     };
 
-    boost::asio::dispatch(ex, boost::asio::bind_allocator(alloc, std::move(thunk)));
+    post_or_dispatch(ex, boost::asio::bind_allocator(alloc, std::move(thunk)));
 }
 } // namespace detail
 

@@ -169,7 +169,6 @@ TEST(AsioAssoc, TypeErasure_move_only_function_DropsSlotAndExecutor) {
     auto h = asio::bind_executor(ex_bind,
                                  asio::bind_cancellation_slot(sig.slot(), RawHandler{}));
 
-
     auto slot_before = asio::get_associated_cancellation_slot(h);
     EXPECT_TRUE(slot_before.is_connected());
     move_only_function<void(const error_code &)> f = std::move(h);
@@ -239,8 +238,8 @@ TEST(AsioAssoc, CustomHandler_Move_DisconnectsMovedFrom_BothSlotAndExecutor) {
 
     auto ex_moved_from = asio::get_associated_executor(h, ex_fb);
     auto ex_moved_to = asio::get_associated_executor(h2, ex_fb);
-    EXPECT_TRUE(ex_moved_from == ex_fb); // fallback (lost binding)
-    EXPECT_TRUE(ex_moved_to == ex_bind); // retained
+    EXPECT_TRUE(ex_moved_from == ex_fb);       // fallback (lost binding)
+    EXPECT_TRUE(ex_moved_to == ex_bind);       // retained
     EXPECT_TRUE(ex_moved_to != ex_moved_from); // not the same
 
     bool fired = false;
@@ -251,58 +250,58 @@ TEST(AsioAssoc, CustomHandler_Move_DisconnectsMovedFrom_BothSlotAndExecutor) {
 
 // --- Corrected: only assert about the moved-to object ---
 TEST(AsioAssoc, CustomHandler_Move_RetainsAssociationsInMovedTo) {
-  namespace asio = boost::asio;
+    namespace asio = boost::asio;
 
-  asio::io_context io_bind, io_fb;
-  asio::any_io_executor ex_bind = io_bind.get_executor();
-  asio::any_io_executor ex_fb   = io_fb.get_executor();
+    asio::io_context io_bind, io_fb;
+    asio::any_io_executor ex_bind = io_bind.get_executor();
+    asio::any_io_executor ex_fb = io_fb.get_executor();
 
-  auto sig = std::make_shared<asio::cancellation_signal>();
-  HotPotatoHandler h{sig, ex_bind};
+    auto sig = std::make_shared<asio::cancellation_signal>();
+    HotPotatoHandler h{sig, ex_bind};
 
-  // Pre-move: associations present
-  ASSERT_TRUE(asio::get_associated_cancellation_slot(h).is_connected());
-  ASSERT_TRUE(asio::get_associated_executor(h, ex_fb) == ex_bind);
+    // Pre-move: associations present
+    ASSERT_TRUE(asio::get_associated_cancellation_slot(h).is_connected());
+    ASSERT_TRUE(asio::get_associated_executor(h, ex_fb) == ex_bind);
 
-  // Move; do not use 'h' from here on
-  HotPotatoHandler h2 = std::move(h);
+    // Move; do not use 'h' from here on
+    HotPotatoHandler h2 = std::move(h);
 
-  // Moved-to retains both associations
-  auto slot2 = asio::get_associated_cancellation_slot(h2);
-  EXPECT_TRUE(slot2.is_connected());
+    // Moved-to retains both associations
+    auto slot2 = asio::get_associated_cancellation_slot(h2);
+    EXPECT_TRUE(slot2.is_connected());
 
-  auto ex2 = asio::get_associated_executor(h2, ex_fb);
-  EXPECT_TRUE(ex2 == ex_bind);
+    auto ex2 = asio::get_associated_executor(h2, ex_fb);
+    EXPECT_TRUE(ex2 == ex_bind);
 
-  // Cancellation fires exactly once on the moved-to
-  bool fired = false;
-  slot2.assign([&](asio::cancellation_type_t){ fired = true; });
-  sig->emit(asio::cancellation_type::total);
-  EXPECT_TRUE(fired);
+    // Cancellation fires exactly once on the moved-to
+    bool fired = false;
+    slot2.assign([&](asio::cancellation_type_t) { fired = true; });
+    sig->emit(asio::cancellation_type::total);
+    EXPECT_TRUE(fired);
 }
 
 // --- Double-move: only the final owner should observe cancellation ---
 TEST(AsioAssoc, CustomHandler_DoubleMove_OnlyLatestReceivesCancellation) {
-  namespace asio = boost::asio;
+    namespace asio = boost::asio;
 
-  asio::io_context io_bind, io_fb;
-  asio::any_io_executor ex_bind = io_bind.get_executor();
-  asio::any_io_executor ex_fb   = io_fb.get_executor();
+    asio::io_context io_bind, io_fb;
+    asio::any_io_executor ex_bind = io_bind.get_executor();
+    asio::any_io_executor ex_fb = io_fb.get_executor();
 
-  auto sig = std::make_shared<asio::cancellation_signal>();
-  HotPotatoHandler h{sig, ex_bind};
-  HotPotatoHandler h2 = std::move(h);
-  HotPotatoHandler h3 = std::move(h2); // only h3 will be used/asserted
+    auto sig = std::make_shared<asio::cancellation_signal>();
+    HotPotatoHandler h{sig, ex_bind};
+    HotPotatoHandler h2 = std::move(h);
+    HotPotatoHandler h3 = std::move(h2); // only h3 will be used/asserted
 
-  // Executor still the one we bound initially
-  auto ex3 = asio::get_associated_executor(h3, ex_fb);
-  EXPECT_TRUE(ex3 == ex_bind);
+    // Executor still the one we bound initially
+    auto ex3 = asio::get_associated_executor(h3, ex_fb);
+    EXPECT_TRUE(ex3 == ex_bind);
 
-  // Assign cancellation only on the final owner
-  int fired = 0;
-  asio::get_associated_cancellation_slot(h3)
-      .assign([&](asio::cancellation_type_t){ ++fired; });
+    // Assign cancellation only on the final owner
+    int fired = 0;
+    asio::get_associated_cancellation_slot(h3)
+        .assign([&](asio::cancellation_type_t) { ++fired; });
 
-  sig->emit(asio::cancellation_type::total);
-  EXPECT_EQ(fired, 1);
+    sig->emit(asio::cancellation_type::total);
+    EXPECT_EQ(fired, 1);
 }

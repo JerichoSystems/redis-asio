@@ -1,17 +1,17 @@
 ---
 Checks: >
   -*,
-  bugprone-*, 
-  cert-*, 
-  cppcoreguidelines-*, 
-  modernize-*, 
-  performance-*, 
+  bugprone-*,
+  cert-*,
+  cppcoreguidelines-*,
+  modernize-*,
+  performance-*,
   readability-*,
   clang-analyzer-*,
-  misc-*, 
-  portability-*, 
+  misc-*,
+  portability-*,
   hicpp-*,
-  google-*, 
+  google-*,
   llvm-*,
   mpi-*,
   mpi-*,
@@ -20,13 +20,13 @@ Checks: >
   ality-*,
   llvma
 
-WarningsAsErrors: ''
-HeaderFilterRegex: '.*'
+WarningsAsErrors: ""
+HeaderFilterRegex: ".*"
 AnalyzeTemporaryDtors: false
 FormatStyle: none
 CheckOptions:
   - key: modernize-use-nullptr.NullMacros
-    value: 'NULL'
+    value: "NULL"
   - key: readability-identifier-naming.NamespaceCase
     value: CamelCase
   - key: readability-identifier-naming.ClassCase
@@ -40,7 +40,7 @@ CheckOptions:
   - key: readability-identifier-naming.ParameterCase
     value: camelBack
   - key: readability-identifier-naming.PrivateMemberSuffix
-    value: '_'
+    value: "_"
   - key: readability-identifier-naming.ClassMemberCase
     value: camelBack
   - key: readability-identifier-naming.StructMemberCase
@@ -48,7 +48,7 @@ CheckOptions:
   - key: readability-identifier-naming.ConstexprVariableCase
     value: CamelCase
   - key: readability-identifier-naming.StaticMemberSuffix
-    value: '_'
+    value: "_"
   - key: readability-identifier-naming.EnumerationCase
     value: CamelCase
   - key: readability-identifier-naming.EnumeratorCase
@@ -56,33 +56,33 @@ CheckOptions:
   - key: readability-identifier-naming.MacroDefinitionCase
     value: UPPER_CASE
   - key: readability-identifier-naming.MacroDefinitionUnderscore
-    value: '0'
+    value: "0"
   - key: readability-identifier-naming.MacroDefinitionSuffix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.MacroDefinitionPrefix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.VariablePrefix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.PrivateMemberPrefix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.StructMemberPrefix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.ClassMemberPrefix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.ConstexprVariablePrefix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.StaticMemberPrefix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.PrivateMemberSuffix
-    value: '_'
+    value: "_"
   - key: readability-identifier-naming.ClassMemberSuffix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.StructMemberSuffix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.ConstexprVariableSuffix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.StaticMemberSuffix
-    value: '_'
+    value: "_"
   - key: readability-identifier-naming.ClassCase
     value: CamelCase
   - key: readability-identifier-naming.FunctionCase
@@ -98,35 +98,34 @@ CheckOptions:
   - key: readability-identifier-naming.MacroDefinitionCase
     value: UPPER_CASE
   - key: readability-identifier-naming.MacroDefinitionUnderscore
-    value: '0'
+    value: "0"
   - key: readability-identifier-naming.MacroDefinitionSuffix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.MacroDefinitionPrefix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.VariablePrefix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.PrivateMemberPrefix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.StructMemberPrefix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.ClassMemberPrefix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.ConstexprVariablePrefix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.StaticMemberPrefix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.PrivateMemberSuffix
-    value: '_'
+    value: "_"
   - key: readability-identifier-naming.ClassMemberSuffix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.StructMemberSuffix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.ConstexprVariableSuffix
-    value: ''
+    value: ""
   - key: readability-identifier-naming.StaticMemberSuffix
-    value: '_'
+    value: "_"
   - key: readability-identifier-naming.EnumerationCase
     value: CamelCase
   - key: readability-identifier-naming.EnumeratorCase
     value: CamelCase
-...

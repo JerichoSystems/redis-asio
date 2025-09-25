@@ -1,7 +1,7 @@
 #include <gtest/gtest.h>
-#include <vector>
-#include <string>
 #include <memory>
+#include <string>
+#include <vector>
 
 #include "redis_log.hpp"
 
@@ -18,7 +18,7 @@ struct TestLogger2 final : Logger {
     Level min_;
 };
 
-} // anonymous
+} // namespace
 
 TEST(LoggingBasic_Off, InfoStillWorks) {
     auto lg = std::make_shared<TestLogger2>(Logger::Level::trace);
@@ -30,8 +30,8 @@ TEST(LoggingBasic_Off, InfoStillWorks) {
 TEST(Macros_Off, DebugNoArgEvaluationWhenCompiledOut) {
     auto lg = std::make_shared<TestLogger2>(Logger::Level::trace);
     int side = 0;
-    auto inc = [&]{ ++side; return 42; };
+    auto inc = [&] { ++side; return 42; };
     REDIS_DEBUG(lg, "side {}", inc());
-    EXPECT_EQ(side, 0);              // arguments not evaluated
+    EXPECT_EQ(side, 0); // arguments not evaluated
     EXPECT_TRUE(lg->entries.empty());
 }

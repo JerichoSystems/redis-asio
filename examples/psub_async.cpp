@@ -68,7 +68,7 @@ subscriber(std::shared_ptr<redis_asio::RedisAsyncConnection> c) {
         }
         if (msg.pattern) {
             REDIS_INFO_RT(log, "pmessage pattern={} channel={} payload={} left={}", *msg.pattern,
-                       msg.channel, msg.payload, i);
+                          msg.channel, msg.payload, i);
         } else {
             REDIS_INFO_RT(log, "message channel={} payload={} left={}", msg.channel, msg.payload, i);
         }
@@ -78,7 +78,7 @@ subscriber(std::shared_ptr<redis_asio::RedisAsyncConnection> c) {
 
 // Optional: simple publisher that sends one test message after a short delay
 static asio::awaitable<void> one_shot_publisher(asio::any_io_executor ex) {
-    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::trace ,"psub_async");
+    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::trace, "psub_async");
     auto c = redis_asio::RedisAsyncConnection::create(ex, log);
     using boost::asio::as_tuple;
     auto [ec, already] =
@@ -100,7 +100,7 @@ static asio::awaitable<void> one_shot_publisher(asio::any_io_executor ex) {
 
 int main() {
     redis_asio::RedisAsyncConnection::initOpenSSL();
-    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::trace ,"psub_async");
+    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::trace, "psub_async");
     try {
         asio::io_context ioc;
         auto c = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
