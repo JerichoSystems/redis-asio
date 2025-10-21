@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(redis_asio VERSION 0.1.7 LANGUAGES C CXX)
+project(redis_asio VERSION 0.1.8 LANGUAGES C CXX)
 
 if(POLICY CMP0167)
     # Keep FindBoost module behavior and silence the dev warning.
@@ -36,7 +36,7 @@ include(FetchContent)
 find_package(Threads REQUIRED)
 
 # Prefer CONFIG packages so vcpkg works out-of-the-box:
-find_package(boost_asio CONFIG REQUIRED)
+find_package(Boost CONFIG REQUIRED COMPONENTS asio)
 find_package(hiredis CONFIG REQUIRED) # provides hiredis::hiredis
 find_package(hiredis_ssl CONFIG REQUIRED) # provides hiredis::hiredis_ssl
 
