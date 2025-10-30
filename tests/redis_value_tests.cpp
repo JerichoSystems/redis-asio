@@ -257,6 +257,7 @@ TEST(RedisValue, ToStringAndHelpers) {
         i.payload = 5LL;
         auto bad = redis_asio::string_like(i);
         EXPECT_FALSE(bad.has_value());
+        EXPECT_EQ(bad.error(), redis_asio::protocol_error());
     }
     // implicit string conversion
     {

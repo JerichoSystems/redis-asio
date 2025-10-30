@@ -45,6 +45,9 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+The test executables are not installed by default. To package them alongside the library, enable both
+`REDIS_ASIO_BUILD_TESTS` and `REDIS_ASIO_INSTALL_TESTS` when configuring CMake.
+
 ## License
 
-MIT License. See `LICENCE` file.
+MIT License. See [`LICENSE`](LICENSE) file.

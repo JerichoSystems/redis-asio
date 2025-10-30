@@ -22,7 +22,6 @@
 #include <string_view>
 #include <system_error>
 #include <type_traits>
-#include <type_traits> // for detail::complete (if not already present)
 #include <unordered_map>
 #include <variant>
 #include <vector>
@@ -33,6 +32,8 @@
 namespace redis_asio {
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
+
+struct RedisAsyncConnectionTestAccess;
 
 // Forward decls
 // struct RedisValue; // defined in redis_value.hpp
@@ -73,6 +74,7 @@ inline const std::error_category &category() {
     return cat;
 }
 inline std::error_code make_error(error_category::errc e) { return {static_cast<int>(e), category()}; }
+inline std::error_code protocol_error() { return make_error(error_category::errc::protocol_error); }
 
 // ---- Options ----
 /**
@@ -405,6 +407,8 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     void schedule_next_ping();
 
   private:
+    friend struct RedisAsyncConnectionTestAccess;
+
     asio::strand<executor_type> strand_;
     asio::steady_timer reconnect_timer_;
     asio::steady_timer ping_timer_;
@@ -439,6 +443,9 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     std::string hello_summary_;
     Health health_{Health::healthy};
     int ping_failures_{0};
+
+    static void handle_unsub_reply(redisAsyncContext *c, void *r, void *priv);
+    static void handle_sub_reply(redisAsyncContext *c, void *r, void *priv);
 };
 
 // ===== Inline template implementations =====

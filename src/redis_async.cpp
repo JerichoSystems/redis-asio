@@ -9,6 +9,21 @@ namespace redis_asio {
 
 using namespace std::chrono_literals;
 
+namespace {
+std::string_view reply_first_string(redisReply *r) {
+    if (!r)
+        return {};
+    redisReply *head = nullptr;
+    if (r->type == REDIS_REPLY_ARRAY && r->elements > 0)
+        head = r->element[0];
+    else if (r->type == REDIS_REPLY_PUSH && r->elements > 0)
+        head = r->element[0];
+    if (head && head->type == REDIS_REPLY_STRING)
+        return {head->str, static_cast<size_t>(head->len)};
+    return {};
+}
+} // namespace
+
 static inline std::chrono::milliseconds next_backoff(std::chrono::milliseconds cur,
                                                      std::chrono::milliseconds initial,
                                                      std::chrono::milliseconds maxv) {
@@ -420,34 +435,29 @@ void RedisAsyncConnection::issue_unsub(const char *verb,
     // Helper: parse first element string of a reply (ARRAY or PUSH)
     // IMPORTANT: For UNSUB/PUNSUB, hiredis invokes THIS callback only on error
     // We keep baton_raw valid in the map until (P)UNSUBSCRIBE is acked (or error).
-    if (redisAsyncCommand(ctx_, [](redisAsyncContext *c, void *r, void *priv) {
-        auto first_str = [](redisReply* r) -> std::string_view {
-            if (!r) return {};
-            redisReply* head = nullptr;
-            if (r->type == REDIS_REPLY_ARRAY && r->elements > 0) head = r->element[0];
-            else if (r->type == REDIS_REPLY_PUSH && r->elements > 0) head = r->element[0];
-            if (head && head->type == REDIS_REPLY_STRING) return {head->str, static_cast<size_t>(head->len)};
-            return {};
-        };
+    if (redisAsyncCommand(ctx_, &RedisAsyncConnection::handle_unsub_reply, priv, "%s %s", verb, std::string(subject).c_str()) != REDIS_OK) {
+        REDIS_ERROR_RT(log_, "{} submit failed for '{}'", verb, subject);
+        // Undo baton on submission failure
+        if (is_punsub)
+            pch_unsub_batons_.erase(std::string(subject));
+        else if (is_unsub)
+            ch_unsub_batons_.erase(std::string(subject));
+    }
+    if (cb)
+        detail::complete_on_associated(std::move(cb), strand_, make_error(error_category::errc::protocol_error));
+    // asio::post(strand_, [cb = std::move(cb)]() mutable { cb(make_error(error_category::errc::protocol_error)); });
+}
 
-          auto* self = static_cast<RedisAsyncConnection*>(c->data);
-          redisReply* reply = static_cast<redisReply*>(r);
-          RedisValue rv = RedisValue::fromRaw(reply);
-          const std::string_view kind = first_str(reply);
+void RedisAsyncConnection::handle_unsub_reply(redisAsyncContext *c, void *r, void *priv) {
+    auto *self = c ? static_cast<RedisAsyncConnection *>(c->data) : nullptr;
+    redisReply *reply = static_cast<redisReply *>(r);
+    const std::string_view kind = reply_first_string(reply);
 
-          // UNSUB/PUNSUB path: priv is UnsubBaton*, receives all errors
-          if (priv) {
-            auto* baton = static_cast<UnsubBaton*>(priv);
-
-            auto keep_self = baton->w.lock(); // strong ref for posted work
-            if (!keep_self) {
-              // Client is gone, we are shutting down: no further work
-              return;
-            }
-
+    if (priv) {
+        auto *baton = static_cast<UnsubBaton *>(priv);
+        if (auto keep_self = baton->w.lock()) {
+            auto *strong_self = keep_self.get();
             if (!reply) {
-              // Final NULL on error/disconnect: drop baton
-              if (keep_self) {
                 asio::dispatch(keep_self->strand_, [self = keep_self, pat = baton->is_pattern, subj = baton->subject]() {
                     if (pat)
                         self->pch_unsub_batons_.erase(subj);
@@ -455,52 +465,37 @@ void RedisAsyncConnection::issue_unsub(const char *verb,
                         self->ch_unsub_batons_.erase(subj);
                     // TODO Perhaps check the unsub ack?
                 });
-              } else if(baton) {
-                  delete baton; // Destroy baton
-              }
-              return;
+                return;
             }
 
             if (kind == "unsubscribe" || kind == "punsubscribe") {
-                REDIS_WARN_RT(self->log_, "unsub unsubscribe called... weird....: {}", baton->subject);
-              // Final callback for this subject: drop baton
-              if (keep_self) {
+                REDIS_WARN_RT(strong_self->log_, "unsub unsubscribe called... weird....: {}", baton->subject);
                 asio::dispatch(keep_self->strand_, [self = keep_self, pat = baton->is_pattern, subj = baton->subject]() {
                     // TODO Perhaps check the unsub ack?
-                    if (pat) self->pch_unsub_batons_.erase(subj); else self->ch_unsub_batons_.erase(subj);
+                    if (pat)
+                        self->pch_unsub_batons_.erase(subj);
+                    else
+                        self->ch_unsub_batons_.erase(subj);
                 });
-              } else if(baton) {
-                  delete baton; // Destroy baton
-              }
-              return;
+                return;
             }
 
             // Other notifications (ignore)
             return;
-          } else {
-            REDIS_CRITICAL_RT(self->log_, "unsub callback called without baton, kind={}", kind);
-          }
-
-          // UNSUB/PUNSUB path (priv==nullptr here): one-shot completion
-          if (self) {
-            std::error_code ec;
-            if (!reply) ec = make_error(error_category::errc::protocol_error);
-            // We complete the original caller via the lambda we bound below (see post()).
-            // No-op here; actual cb runs from the bound context.
-          } }, priv, "%s %s", verb, std::string(subject).c_str()) != REDIS_OK) {
-        REDIS_ERROR_RT(log_, "{} submit failed for '{}'", verb, subject);
-        // Undo baton on submission failure
-        if (is_punsub)
-            pch_unsub_batons_.erase(std::string(subject));
-        else if (is_unsub)
-            ch_unsub_batons_.erase(std::string(subject));
-        else if (priv) {
-            delete priv;
         }
+
+        if (self) {
+            if (baton->is_pattern)
+                self->pch_unsub_batons_.erase(baton->subject);
+            else
+                self->ch_unsub_batons_.erase(baton->subject);
+        }
+        return;
     }
-    if (cb)
-        detail::complete_on_associated(std::move(cb), strand_, make_error(error_category::errc::protocol_error));
-    // asio::post(strand_, [cb = std::move(cb)]() mutable { cb(make_error(error_category::errc::protocol_error)); });
+
+    if (self) {
+        REDIS_CRITICAL_RT(self->log_, "unsub callback called without baton, kind={}", kind);
+    }
 }
 
 void RedisAsyncConnection::issue_sub(const char *verb,
@@ -535,34 +530,28 @@ void RedisAsyncConnection::issue_sub(const char *verb,
 
     // IMPORTANT: For SUB/PSUB, hiredis invokes THIS callback repeatedly for publishes.
     // We keep baton_raw valid in the map until (P)UNSUBSCRIBE is acked (or error).
-    if (redisAsyncCommand(ctx_, [](redisAsyncContext *c, void *r, void *priv) {
-        auto first_str = [](redisReply* r) -> std::string_view {
-            if (!r) return {};
-            redisReply* head = nullptr;
-            if (r->type == REDIS_REPLY_ARRAY && r->elements > 0) head = r->element[0];
-            else if (r->type == REDIS_REPLY_PUSH && r->elements > 0) head = r->element[0];
-            if (head && head->type == REDIS_REPLY_STRING) return {head->str, static_cast<size_t>(head->len)};
-            return {};
-        };
+    if (redisAsyncCommand(ctx_, &RedisAsyncConnection::handle_sub_reply, priv, "%s %s", verb, std::string(subject).c_str()) != REDIS_OK) {
+        REDIS_ERROR_RT(log_, "{} submit failed for '{}'", verb, subject);
+        // Undo baton on submission failure
+        if (is_psub)
+            pch_batons_.erase(std::string(subject));
+        else if (is_sub)
+            ch_batons_.erase(std::string(subject));
+    }
+    if (cb)
+        detail::complete_on_associated(std::move(cb), strand_, make_error(error_category::errc::protocol_error));
+    // asio::post(strand_, [cb = std::move(cb)]() mutable { cb(make_error(error_category::errc::protocol_error)); });
+}
 
-          auto* self = static_cast<RedisAsyncConnection*>(c->data);
-          redisReply* reply = static_cast<redisReply*>(r);
-          RedisValue rv = RedisValue::fromRaw(reply);
-          const std::string_view kind = first_str(reply);
+void RedisAsyncConnection::handle_sub_reply(redisAsyncContext *c, void *r, void *priv) {
+    auto *self = c ? static_cast<RedisAsyncConnection *>(c->data) : nullptr;
+    redisReply *reply = static_cast<redisReply *>(r);
+    const std::string_view kind = reply_first_string(reply);
 
-          // SUB/PSUB path: priv is SubBaton*, receives ack + publishes + final (P)UNSUB ack
-          if (priv) {
-            auto* baton = static_cast<SubBaton*>(priv);
-
-            auto keep_self = baton->w.lock(); // strong ref for posted work
-            if (!keep_self) {
-              // Client is gone, we are shutting down: no further work
-              return;
-            }
-
+    if (priv) {
+        auto *baton = static_cast<SubBaton *>(priv);
+        if (auto keep_self = baton->w.lock()) {
             if (!reply) {
-              // Final NULL on error/disconnect: drop baton
-              if (keep_self) {
                 asio::dispatch(keep_self->strand_, [self = keep_self, pat = baton->is_pattern, subj = baton->subject]() {
                     if (pat)
                         self->pch_batons_.erase(subj);
@@ -570,84 +559,66 @@ void RedisAsyncConnection::issue_sub(const char *verb,
                         self->ch_batons_.erase(subj);
                     // TODO Perhaps check the unsub ack?
                 });
-              } else if(baton) {
-                  delete baton; // Destroy baton
-              }
-              return;
+                return;
             }
 
             if (!baton->acked && (kind == "subscribe" || kind == "psubscribe")) {
-              baton->acked = true;
-              if (keep_self && baton->on_ack) {
-                  detail::complete_on_associated(std::move(baton->on_ack), keep_self->strand_, std::error_code{});
-              }
-              return;
+                baton->acked = true;
+                if (baton->on_ack) {
+                    detail::complete_on_associated(std::move(baton->on_ack), keep_self->strand_, std::error_code{});
+                }
+                return;
             }
 
             if (kind == "message" || kind == "pmessage") {
-              if (keep_self) {
                 auto pm = parse_pubsub_reply(reply);
-                // route publish to channel
                 keep_self->pub_channel_.try_send(boost::system::error_code{}, std::move(pm));
                 keep_self->ping_failures_ = 0;
                 keep_self->health_ = Health::healthy;
-              }
-              return;
+                return;
             }
 
             if (kind == "unsubscribe" || kind == "punsubscribe") {
-              // Final callback for this subject: drop baton
-              if (keep_self) {
                 asio::dispatch(keep_self->strand_, [self = keep_self, pat = baton->is_pattern, subj = baton->subject]() {
                     // TODO Should this be erased already?
-                    if (pat) self->pch_batons_.erase(subj); else self->ch_batons_.erase(subj);
+                    if (pat)
+                        self->pch_batons_.erase(subj);
+                    else
+                        self->ch_batons_.erase(subj);
 
                     if (pat) {
-                        auto baton = self->pch_unsub_batons_.find(subj);
-                        if(baton != self->pch_unsub_batons_.end() && baton->second && baton->second->on_ack && !baton->second->acked) {
-                            detail::complete_on_associated(std::move(baton->second->on_ack), self->strand_, std::error_code{});
+                        auto it = self->pch_unsub_batons_.find(subj);
+                        if (it != self->pch_unsub_batons_.end() && it->second && it->second->on_ack && !it->second->acked) {
+                            detail::complete_on_associated(std::move(it->second->on_ack), self->strand_, std::error_code{});
                         }
                         self->pch_unsub_batons_.erase(subj);
                     } else {
-                        auto baton = self->ch_unsub_batons_.find(subj);
-                        if(baton != self->ch_unsub_batons_.end() && baton->second && baton->second->on_ack && !baton->second->acked) {
-                            detail::complete_on_associated(std::move(baton->second->on_ack), self->strand_, std::error_code{});
+                        auto it = self->ch_unsub_batons_.find(subj);
+                        if (it != self->ch_unsub_batons_.end() && it->second && it->second->on_ack && !it->second->acked) {
+                            detail::complete_on_associated(std::move(it->second->on_ack), self->strand_, std::error_code{});
                         }
                         self->ch_unsub_batons_.erase(subj);
                     }
                 });
-              } else if(baton) {
-                  delete baton; // Destroy baton
-              }
-              return;
+                return;
             }
 
             // Other notifications (ignore)
             return;
-          } else {
-            REDIS_CRITICAL_RT(self->log_, "sub callback called without baton, kind={}", kind);
-          }
-
-          // UNSUB/PUNSUB path (priv==nullptr here): one-shot completion
-          if (self) {
-            std::error_code ec;
-            if (!reply) ec = make_error(error_category::errc::protocol_error);
-            // We complete the original caller via the lambda we bound below (see post()).
-            // No-op here; actual cb runs from the bound context.
-          } }, priv, "%s %s", verb, std::string(subject).c_str()) != REDIS_OK) {
-        REDIS_ERROR_RT(log_, "{} submit failed for '{}'", verb, subject);
-        // Undo baton on submission failure
-        if (is_psub)
-            pch_batons_.erase(std::string(subject));
-        else if (is_sub)
-            ch_batons_.erase(std::string(subject));
-        else if (priv) {
-            delete priv;
         }
+
+        if (self) {
+            if (baton->is_pattern)
+                self->pch_batons_.erase(baton->subject);
+            else
+                self->ch_batons_.erase(baton->subject);
+        }
+        return;
     }
-    if (cb)
-        detail::complete_on_associated(std::move(cb), strand_, make_error(error_category::errc::protocol_error));
-    // asio::post(strand_, [cb = std::move(cb)]() mutable { cb(make_error(error_category::errc::protocol_error)); });
+
+    if (self) {
+        REDIS_CRITICAL_RT(self->log_, "sub callback called without baton, kind={}", kind);
+    }
 }
 
 void RedisAsyncConnection::start_keepalive() {

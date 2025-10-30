@@ -7,6 +7,23 @@ namespace redis_asio {
 HiredisAsioAdapter::HiredisAsioAdapter(executor_type exec, redisAsyncContext *ctx)
     : exec_(exec), ctx_(ctx), fd_(ctx->c.fd), sd_(exec) {
     sd_.assign(fd_);
+    ctx_->ev.data = this;
+    ctx_->ev.addRead = [](void *privdata) {
+        auto adapter = static_cast<HiredisAsioAdapter *>(privdata);
+        adapter->start_wait_read();
+    };
+    ctx_->ev.delRead = [](void *privdata) {
+        auto adapter = static_cast<HiredisAsioAdapter *>(privdata);
+        adapter->reading_ = false;
+    };
+    ctx_->ev.addWrite = [](void *privdata) {
+        auto adapter = static_cast<HiredisAsioAdapter *>(privdata);
+        adapter->start_wait_write();
+    };
+    ctx_->ev.delWrite = [](void *privdata) {
+        auto adapter = static_cast<HiredisAsioAdapter *>(privdata);
+        adapter->writing_ = false;
+    };
 }
 
 HiredisAsioAdapter::~HiredisAsioAdapter() {
@@ -30,7 +47,6 @@ void HiredisAsioAdapter::stop() {
 }
 
 void HiredisAsioAdapter::start_wait_read() {
-    reading_ = true;
     sd_.async_wait(asio::posix::descriptor_base::wait_read, [w = weak_from_this()](auto ec) {
         if (auto self = w.lock()) {
             if (ec || !self->ctx_) {
@@ -44,7 +60,6 @@ void HiredisAsioAdapter::start_wait_read() {
     });
 }
 void HiredisAsioAdapter::start_wait_write() {
-    writing_ = true;
     sd_.async_wait(asio::posix::descriptor_base::wait_write, [w = weak_from_this()](auto ec) {
         if (auto self = w.lock()) {
             if (ec || !self->ctx_) {

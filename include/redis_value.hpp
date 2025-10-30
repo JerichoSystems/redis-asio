@@ -12,6 +12,7 @@ namespace redis_asio {
 
 // Provided by redis_async.hpp
 const std::error_category &category();
+std::error_code protocol_error();
 
 struct RedisValue {
     enum class Type : int {
@@ -186,7 +187,7 @@ inline std::expected<std::string, std::error_code> string_like(const RedisValue 
         if (auto p = std::get_if<std::string>(&rv.payload))
             return *p;
     }
-    return std::unexpected(std::error_code{static_cast<int>(4), category()}); // protocol_error in our category
+    return std::unexpected(protocol_error());
 }
 } // namespace redis_asio
 
