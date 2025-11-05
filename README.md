@@ -16,6 +16,11 @@ Asynchronous C++ client library for Redis, using Boost.Asio and Hiredis.
 - Boost (Asio)
 - Hiredis & Hiredis SSL
 - GTest (for tests)
+
+## Coverage
+
+- Local run: `cmake -S . -B build -DREDIS_ASIO_BUILD_TESTS=ON -DREDIS_ASIO_ENABLE_COVERAGE=ON`, then `cmake --build build --target coverage`. Reports appear in `build/coverage/index.html` and `coverage.xml`.
+- CI: the CircleCI Linux/macOS Debug jobs always publish the same HTML/XML coverage artifacts; grab the latest run from the [CircleCI pipelines page](https://app.circleci.com/pipelines/github/JerichoSystems/redis-asio?branch=main) and download `coverage/index.html`.
 - benchmark (for benches)
 
 All dependencies can be installed via vcpkg or your system package manager.

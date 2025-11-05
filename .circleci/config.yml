@@ -48,7 +48,7 @@ commands:
           command: |
             sudo apt-get update
             sudo apt-get install -y git cmake ninja-build ccache pkg-config curl zip unzip \
-              python3 redis-tools linux-libc-dev
+              python3 python3-pip redis-tools linux-libc-dev lcov
   install_tooling_macos:
     steps:
       - run:
@@ -151,33 +151,60 @@ jobs:
             export VCPKG_OVERLAY_PORTS="${VCPKG_OVERLAY_PORTS}"
             "$VCPKG_ROOT"/vcpkg install
       - save_vcpkg_cache
-
       - run:
           name: Configure (CMake)
           command: |
             # turn SAN on only for Debug
             SAN=$([[ "<< parameters.build_type >>" == "Debug" ]] && echo ON || echo OFF)
+            COV=$([[ "<< parameters.build_type >>" == "Debug" ]] && echo ON || echo OFF)
             echo "Sanitizers: ${SAN}"
+            echo "Coverage: ${COV}"
 
             cmake -S . -B build -G Ninja \
               -DCMAKE_BUILD_TYPE=<< parameters.build_type >> \
               -DREDIS_ASIO_BUILD_TESTS=ON \
               -DREDIS_ASIO_BUILD_EXAMPLES=ON \
               -DREDIS_ASIO_SANITIZE=${SAN} \
+              -DREDIS_ASIO_ENABLE_COVERAGE=${COV} \
               -DVCPKG_MANIFEST_FEATURES="${VCPKG_MANIFEST_FEATURES}" \
               -DCMAKE_TOOLCHAIN_FILE="${VCPKG_ROOT:-$PWD/vcpkg}/scripts/buildsystems/vcpkg.cmake"
       - run: cmake --build build -j
       - run:
           name: Run tests
           command: ctest --test-dir build --output-on-failure -j 2
-      - save_ccache
       - when:
           condition:
-            equal: [ "true", "<< pipeline.parameters.store_artifacts >>" ]
+            equal: [ "<< parameters.build_type >>", "Debug" ]
           steps:
+            - run:
+                name: Generate coverage report
+                command: |
+                  python3 -m pip install --user gcovr
+                  mkdir -p build/coverage
+                  ~/.local/bin/gcovr \
+                    --root "$PWD" \
+                    --object-directory build \
+                    --filter "$PWD" \
+                    --exclude "$PWD/tests/.*" \
+                    --exclude "$PWD/benchmarks/.*" \
+                    --exclude "$PWD/examples/.*" \
+                    --exclude "${PWD}/build/.*" \
+                    --exclude '.*/vcpkg_installed/.*' \
+                    --xml build/coverage/coverage.xml \
+                    --html-details build/coverage/index.html \
+                    --print-summary > build/coverage/summary.txt
             - store_artifacts:
-                path: build/Testing
-                when: on_fail
+                path: build/coverage/index.html
+                when: always
+            - store_artifacts:
+                path: build/coverage/coverage.xml
+                when: always
+            - store_artifacts:
+                path: build/coverage/summary.txt
+                when: always
+      - save_ccache
+      - store_artifacts:
+          path: build/Testing
 
   macos-build:
     executor: macos
@@ -214,12 +241,14 @@ jobs:
       - run:
           name: Configure CMake
           command: |
+            COV=$([[ "<< parameters.build_type >>" == "Debug" ]] && echo ON || echo OFF)
             cmake -S . -B build \
               -G Ninja \
               -DCMAKE_BUILD_TYPE=<< parameters.build_type >> \
               -DREDIS_ASIO_BUILD_TESTS=ON \
               -DREDIS_ASIO_BUILD_EXAMPLES=ON \
               -DREDIS_ASIO_SANITIZE=OFF \
+              -DREDIS_ASIO_ENABLE_COVERAGE=${COV} \
               -DVCPKG_MANIFEST_FEATURES="${VCPKG_MANIFEST_FEATURES}" \
               -DCMAKE_TOOLCHAIN_FILE="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake" \
               -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -227,6 +256,36 @@ jobs:
       - run:
           name: Run unit tests
           command: ctest --test-dir build --output-on-failure -j 2
+      - when:
+          condition:
+            equal: [ "<< parameters.build_type >>", "Debug" ]
+          steps:
+            - run:
+                name: Generate coverage report
+                command: |
+                  python3 -m pip install --user gcovr
+                  mkdir -p build/coverage
+                  ~/.local/bin/gcovr \
+                    --root "$PWD" \
+                    --object-directory build \
+                    --filter "$PWD" \
+                    --exclude "$PWD/tests/.*" \
+                    --exclude "$PWD/benchmarks/.*" \
+                    --exclude "$PWD/examples/.*" \
+                    --exclude "${PWD}/build/.*" \
+                    --exclude '.*/vcpkg_installed/.*' \
+                    --xml build/coverage/coverage.xml \
+                    --html-details build/coverage/index.html \
+                    --print-summary > build/coverage/summary.txt
+            - store_artifacts:
+                path: build/coverage/index.html
+                when: always
+            - store_artifacts:
+                path: build/coverage/coverage.xml
+                when: always
+            - store_artifacts:
+                path: build/coverage/summary.txt
+                when: always
       - save_ccache
 
   linux-sanitizers:
@@ -246,7 +305,6 @@ jobs:
             # If you want to trim features for this job, you can add a minimal smoke vcpkg.json; otherwise:
             "$VCPKG_ROOT"/vcpkg install
       - save_vcpkg_cache
-
       - run:
           name: Configure with ASan/UBSan
           command: |
@@ -267,11 +325,34 @@ jobs:
             ASAN_OPTIONS=detect_leaks=1:strict_string_checks=1:check_initialization_order=1 \
             ctest --test-dir build --output-on-failure -j 2
 
-  port-smoke-overlay:
+  port-smoke-overlay-linux:
     executor: linux
     steps:
       - checkout
       - install_tooling_linux
+      - fetch_bootstrap_vcpkg
+      - restore_vcpkg_cache
+      - run:
+          name: Smoke consumer builds redis-asio overlay
+          command: |
+            mkdir -p smoke && cd smoke
+            cat > vcpkg.json \<<'JSON'
+            {
+              "name": "smoke",
+              "version-string": "0",
+              "dependencies": [
+                { "name": "redis-asio", "default-features": true, "features": [ "tests", "examples", "benchmarks" ] }
+              ]
+            }
+            JSON
+            export VCPKG_ROOT="$PWD/../vcpkg"
+            "$VCPKG_ROOT"/vcpkg install --overlay-ports="${CIRCLE_WORKING_DIRECTORY}/overlay-ports"
+      - save_vcpkg_cache
+  port-smoke-overlay-macos:
+    executor: macos
+    steps:
+      - checkout
+      - install_tooling_macos
       - fetch_bootstrap_vcpkg
       - restore_vcpkg_cache
       - run:
@@ -297,9 +378,9 @@ workflows:
       - linux-build:
           name: Linux • Debug
           build_type: Debug
-      # - linux-build:
-      #     name: Linux • Release
-      #     build_type: Release
+      - linux-build:
+          name: Linux • Release
+          build_type: Release
       - macos-build:
           name: macOS • Debug
           build_type: Debug
@@ -308,5 +389,7 @@ workflows:
           build_type: Release
       - linux-sanitizers:
           name: Linux • Sanitizers
-      - port-smoke-overlay:
-          name: Port smoke (overlay)
+      - port-smoke-overlay-linux:
+          name: Port smoke (overlay) for linux
+      - port-smoke-overlay-macos:
+          name: Port smoke (overlay) for macos
