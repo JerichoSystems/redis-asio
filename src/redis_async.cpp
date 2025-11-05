@@ -241,7 +241,7 @@ void RedisAsyncConnection::on_disconnected(int status) {
     auto d = std::move(disconnect_waiters_);
     disconnect_waiters_.clear();
     for (auto &[id, h] : d) {
-        REDIS_CRITICAL_RT(log_, "notifying disconnect waiter {}", id);
+        REDIS_TRACE_RT(log_, "notifying disconnect waiter {}", id);
         detail::complete_on_associated(std::move(h), strand_, make_error(error_category::errc::stopped));
     }
     connect_inflight_ = false;

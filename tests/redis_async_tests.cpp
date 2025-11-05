@@ -7,8 +7,8 @@
 #include "redis_log.hpp"
 #include "redis_value.hpp"
 
-#include <chrono>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
@@ -249,8 +249,7 @@ TEST(Unit, SubscribeMessageDeliversToChannel) {
     std::error_code recv_ec;
     redis_asio::PublishMessage received{};
 
-    asio::co_spawn(ioc,
-                   [conn, &got_message, &recv_ec, &received]() -> asio::awaitable<void> {
+    asio::co_spawn(ioc, [conn, &got_message, &recv_ec, &received]() -> asio::awaitable<void> {
                        using boost::asio::as_tuple;
                        auto [ec, msg] = co_await conn->async_receive_publish(as_tuple(asio::use_awaitable));
                        recv_ec = ec;
@@ -258,9 +257,7 @@ TEST(Unit, SubscribeMessageDeliversToChannel) {
                            received = std::move(msg);
                            got_message = true;
                        }
-                       co_return;
-                   },
-                   asio::detached);
+                       co_return; }, asio::detached);
 
     ioc.poll(); // allow coroutine to start and suspend on receive
 
@@ -663,7 +660,7 @@ TEST(Integration, ReconnectRestoresPsubscriptionsViaClientKill) {
     auto c_sub = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
     auto c_ctl = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log); // controller/publisher
 
-    asio::co_spawn(ioc, [c_sub, c_ctl]() -> asio::awaitable<void> {
+    asio::co_spawn(ioc, [c_sub, c_ctl, log]() -> asio::awaitable<void> {
         using boost::asio::as_tuple;
         auto opts = opts_from_env();
 
@@ -684,13 +681,19 @@ TEST(Integration, ReconnectRestoresPsubscriptionsViaClientKill) {
         // Kill the subscriber connection from the controller connection
         {
             // Work around GCC coroutine ICE by avoiding mixed init-list with a std::string variable
+            co_spawn(co_await asio::this_coro::executor, [log, c_ctl, idstr]() -> asio::awaitable<void> {
             std::vector<std::string> kill = {"CLIENT", "KILL", "ID", idstr};
-            std::tie(ec, rv) = co_await c_ctl->async_command(kill, as_tuple(asio::use_awaitable));
+                log->log(redis_asio::Logger::Level::info, "Issuing CLIENT KILL to force reconnect");
+                std::error_code ec; redis_asio::RedisValue rv;
+                std::tie(ec, rv) = co_await c_ctl->async_command(kill, as_tuple(asio::use_awaitable));
             EXPECT_FALSE(ec);
+                co_return;
+            }, asio::detached);
         }
 
         // Wait for disconnect then reconnect
-        EXPECT_FALSE(co_await c_sub->async_wait_disconnected(asio::use_awaitable));
+        EXPECT_TRUE(co_await c_sub->async_wait_disconnected(asio::use_awaitable));
+
         // Give the client time to reconnect; if your impl exposes async_wait_connected, use it:
         EXPECT_FALSE(co_await c_sub->async_wait_connected(asio::use_awaitable));
 

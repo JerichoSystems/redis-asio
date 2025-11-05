@@ -48,7 +48,7 @@ commands:
           command: |
             sudo apt-get update
             sudo apt-get install -y git cmake ninja-build ccache pkg-config curl zip unzip \
-              python3 python3-pip redis-tools linux-libc-dev lcov
+              python3 python3-pip redis-tools linux-libc-dev lcov gcovr
   install_tooling_macos:
     steps:
       - run:
@@ -174,21 +174,19 @@ jobs:
           command: ctest --test-dir build --output-on-failure -j 2
       - when:
           condition:
-            equal: [ "<< parameters.build_type >>", "Debug" ]
+            equal: ["<< parameters.build_type >>", "Debug"]
           steps:
             - run:
                 name: Generate coverage report
                 command: |
-                  python3 -m pip install --user gcovr
-                  mkdir -p build/coverage
-                  ~/.local/bin/gcovr \
+                  mkdir -p build/coverage && gcovr \
                     --root "$PWD" \
                     --object-directory build \
                     --filter "$PWD" \
                     --exclude "$PWD/tests/.*" \
                     --exclude "$PWD/benchmarks/.*" \
                     --exclude "$PWD/examples/.*" \
-                    --exclude "${PWD}/build/.*" \
+                    --exclude "$PWD/build/.*" \
                     --exclude '.*/vcpkg_installed/.*' \
                     --xml build/coverage/coverage.xml \
                     --html-details build/coverage/index.html \
@@ -241,14 +239,12 @@ jobs:
       - run:
           name: Configure CMake
           command: |
-            COV=$([[ "<< parameters.build_type >>" == "Debug" ]] && echo ON || echo OFF)
             cmake -S . -B build \
               -G Ninja \
               -DCMAKE_BUILD_TYPE=<< parameters.build_type >> \
               -DREDIS_ASIO_BUILD_TESTS=ON \
               -DREDIS_ASIO_BUILD_EXAMPLES=ON \
               -DREDIS_ASIO_SANITIZE=OFF \
-              -DREDIS_ASIO_ENABLE_COVERAGE=${COV} \
               -DVCPKG_MANIFEST_FEATURES="${VCPKG_MANIFEST_FEATURES}" \
               -DCMAKE_TOOLCHAIN_FILE="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake" \
               -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
@@ -258,7 +254,7 @@ jobs:
           command: ctest --test-dir build --output-on-failure -j 2
       - when:
           condition:
-            equal: [ "<< parameters.build_type >>", "Debug" ]
+            equal: ["<< parameters.build_type >>", "Debug"]
           steps:
             - run:
                 name: Generate coverage report
