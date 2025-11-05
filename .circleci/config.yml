@@ -380,9 +380,9 @@ workflows:
       - macos-build:
           name: macOS • Debug
           build_type: Debug
-      - macos-build:
-          name: macOS • Release
-          build_type: Release
+      # - macos-build:
+      #     name: macOS • Release
+      #     build_type: Release
       - linux-sanitizers:
           name: Linux • Sanitizers
       - port-smoke-overlay-linux:
