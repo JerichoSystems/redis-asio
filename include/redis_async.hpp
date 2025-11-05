@@ -50,6 +50,7 @@ class error_category : public std::error_category {
                       connect_failed = 2,
                       ssl_error = 3,
                       protocol_error = 4,
+                      submission_failed = 5,
                       stopped = 125 };
     const char *name() const noexcept override { return "redis_asio"; }
     std::string message(int ev) const override {
@@ -64,6 +65,8 @@ class error_category : public std::error_category {
             return "TLS/SSL error";
         case errc::protocol_error:
             return "protocol error";
+        case errc::submission_failed:
+            return "command submission failed";
         case errc::stopped:
             return "operation aborted";
         }
@@ -77,6 +80,7 @@ inline const std::error_category &category() {
 }
 inline std::error_code make_error(error_category::errc e) { return {static_cast<int>(e), category()}; }
 inline std::error_code protocol_error() { return make_error(error_category::errc::protocol_error); }
+inline std::error_code submission_failed() { return make_error(error_category::errc::submission_failed); }
 
 // ---- Options ----
 /**

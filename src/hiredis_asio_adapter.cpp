@@ -34,7 +34,8 @@ HiredisAsioAdapter::HiredisAsioAdapter(executor_type exec, redisAsyncContext *ct
 HiredisAsioAdapter::~HiredisAsioAdapter() {
     stop();
     //  Do not close the fd; hiredis owns it. Release to avoid double-close.
-    sd_.release();
+    if (sd_.is_open())
+        sd_.release();
 }
 
 void HiredisAsioAdapter::start() {
@@ -47,6 +48,9 @@ void HiredisAsioAdapter::stop() {
     reading_ = writing_ = false;
     boost::system::error_code ec;
     sd_.cancel(ec);
+    if (sd_.is_open()) {
+        (void)sd_.release();
+    }
     if (ctx) {
         ctx->ev.addRead = nullptr;
         ctx->ev.delRead = nullptr;
