@@ -65,119 +65,81 @@ if(REDIS_ASIO_BUILD_TESTS)
     find_package(GTest CONFIG REQUIRED)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 
-    add_executable(redis_async_tests
-        tests/redis_async_tests.cpp
-    )
+    set(REDIS_ASIO_TEST_TARGETS "")
 
-    target_link_libraries(redis_async_tests PRIVATE Boost::asio redis_asio GTest::gtest_main)
-    target_include_directories(redis_async_tests
-        PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-        ${Boost_INCLUDE_DIRS})
+    function(redis_asio_add_gtest target)
+        cmake_parse_arguments(ARG "" "" "SOURCES;DEFINES;LIBS" ${ARGN})
+        if(NOT ARG_SOURCES)
+            message(FATAL_ERROR "redis_asio_add_gtest(${target}) requires SOURCES")
+        endif()
+        add_executable(${target} ${ARG_SOURCES})
+        target_link_libraries(${target} PRIVATE GTest::gtest_main ${ARG_LIBS})
+        target_include_directories(${target}
+            PUBLIC
+                $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+                $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
+                ${Boost_INCLUDE_DIRS})
+        target_compile_definitions(${target} PRIVATE REDIS_ASIO_TEST_ACCESS)
+        if(ARG_DEFINES)
+            target_compile_definitions(${target} PRIVATE ${ARG_DEFINES})
+        endif()
+        redis_asio_enable_sanitizers(${target})
+        set(local_targets ${REDIS_ASIO_TEST_TARGETS})
+        list(APPEND local_targets ${target})
+        set(REDIS_ASIO_TEST_TARGETS "${local_targets}" PARENT_SCOPE)
+    endfunction()
 
-    redis_asio_enable_sanitizers(redis_async_tests)
+    redis_asio_add_gtest(redis_async_tests
+        SOURCES tests/redis_async_tests.cpp
+        LIBS Boost::asio redis_asio)
 
-    add_executable(redis_value_tests
-        tests/redis_value_tests.cpp
-    )
+    redis_asio_add_gtest(redis_value_tests
+        SOURCES tests/redis_value_tests.cpp
+        LIBS Boost::asio redis_asio)
 
-    target_link_libraries(redis_value_tests PRIVATE Boost::asio redis_asio GTest::gtest_main)
-    target_include_directories(redis_value_tests
-        PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-        ${Boost_INCLUDE_DIRS})
+    redis_asio_add_gtest(hiredis_asio_adapter_tests
+        SOURCES tests/hiredis_asio_adapter_tests.cpp
+        LIBS Boost::asio redis_asio)
 
-    redis_asio_enable_sanitizers(redis_value_tests)
+    redis_asio_add_gtest(redis_log_on_tests
+        SOURCES tests/redis_log_on_tests.cpp src/redis_log.cpp
+        DEFINES
+            REDIS_LOG_MIN_LEVEL=::redis_asio::Logger::Level::trace
+            REDIS_LOG_MIN_LEVEL_I=0
+            REDIS_LOG_SOURCE_MIN_LEVEL=::redis_asio::Logger::Level::warn
+            REDIS_LOG_FORCE_COLOR)
 
-    add_executable(redis_log_on_tests
-        tests/redis_log_on_tests.cpp
-        src/redis_log.cpp
-    )
-    target_link_libraries(redis_log_on_tests PRIVATE GTest::gtest_main)
-    target_compile_definitions(redis_log_on_tests PRIVATE
-        REDIS_LOG_MIN_LEVEL=::redis_asio::Logger::Level::trace
-        REDIS_LOG_MIN_LEVEL_I=0
-        REDIS_LOG_SOURCE_MIN_LEVEL=::redis_asio::Logger::Level::warn
-        REDIS_LOG_FORCE_COLOR)
-    target_include_directories(redis_log_on_tests
-        PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-        ${Boost_INCLUDE_DIRS})
+    redis_asio_add_gtest(redis_log_off_tests
+        SOURCES tests/redis_log_off_tests.cpp src/redis_log.cpp
+        DEFINES
+            REDIS_LOG_MIN_LEVEL=::redis_asio::Logger::Level::info
+            REDIS_LOG_MIN_LEVEL_I=2
+            REDIS_LOG_SOURCE_MIN_LEVEL=::redis_asio::Logger::Level::warn
+            REDIS_LOG_DISABLE_COLOR)
 
-    redis_asio_enable_sanitizers(redis_log_on_tests)
+    redis_asio_add_gtest(redis_log_rt_tests
+        SOURCES tests/redis_log_rt_tests.cpp src/redis_log.cpp
+        DEFINES
+            REDIS_LOG_MIN_LEVEL=::redis_asio::Logger::Level::trace
+            REDIS_LOG_MIN_LEVEL_I=0
+            REDIS_LOG_SOURCE_MIN_LEVEL=::redis_asio::Logger::Level::warn
+            REDIS_LOG_FORCE_COLOR)
 
-    add_executable(redis_log_off_tests
-        tests/redis_log_off_tests.cpp
-        src/redis_log.cpp
-    )
-    target_link_libraries(redis_log_off_tests PRIVATE GTest::gtest_main)
-    target_compile_definitions(redis_log_off_tests PRIVATE
-        REDIS_LOG_MIN_LEVEL=::redis_asio::Logger::Level::info
-        REDIS_LOG_MIN_LEVEL_I=2
-        REDIS_LOG_SOURCE_MIN_LEVEL=::redis_asio::Logger::Level::warn
-        REDIS_LOG_DISABLE_COLOR)
-    target_include_directories(redis_log_off_tests
-        PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-        ${Boost_INCLUDE_DIRS})
-
-    redis_asio_enable_sanitizers(redis_log_off_tests)
-
-    add_executable(redis_log_rt_tests
-        tests/redis_log_rt_tests.cpp
-        src/redis_log.cpp
-    )
-    target_link_libraries(redis_log_rt_tests PRIVATE GTest::gtest_main)
-    target_compile_definitions(redis_log_rt_tests PRIVATE
-        REDIS_LOG_MIN_LEVEL=::redis_asio::Logger::Level::trace
-        REDIS_LOG_MIN_LEVEL_I=0
-        REDIS_LOG_SOURCE_MIN_LEVEL=::redis_asio::Logger::Level::warn
-        REDIS_LOG_FORCE_COLOR)
-    target_include_directories(redis_log_rt_tests
-        PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-        ${Boost_INCLUDE_DIRS})
-
-    redis_asio_enable_sanitizers(redis_log_rt_tests)
-
-    add_executable(redis_asio_tests
-        tests/redis_asio_tests.cpp
-    )
-    target_link_libraries(redis_asio_tests PRIVATE GTest::gtest_main)
-    target_compile_definitions(redis_asio_tests PRIVATE
-        REDIS_LOG_MIN_LEVEL=::redis_asio::Logger::Level::trace
-        REDIS_LOG_MIN_LEVEL_I=0
-        REDIS_LOG_SOURCE_MIN_LEVEL=::redis_asio::Logger::Level::warn
-        REDIS_LOG_FORCE_COLOR)
-    target_include_directories(redis_asio_tests
-        PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
-        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>
-        ${Boost_INCLUDE_DIRS})
-
-    redis_asio_enable_sanitizers(redis_asio_tests)
+    redis_asio_add_gtest(redis_asio_tests
+        SOURCES tests/redis_asio_tests.cpp
+        DEFINES
+            REDIS_LOG_MIN_LEVEL=::redis_asio::Logger::Level::trace
+            REDIS_LOG_MIN_LEVEL_I=0
+            REDIS_LOG_SOURCE_MIN_LEVEL=::redis_asio::Logger::Level::warn
+            REDIS_LOG_FORCE_COLOR)
 
     include(GoogleTest)
-    gtest_discover_tests(redis_asio_tests)
-    gtest_discover_tests(redis_async_tests)
-    gtest_discover_tests(redis_value_tests)
-    gtest_discover_tests(redis_log_on_tests)
-    gtest_discover_tests(redis_log_off_tests)
-    gtest_discover_tests(redis_log_rt_tests)
-
-    if(REDIS_ASIO_INSTALL_TESTS)
-        install(TARGETS redis_asio_tests RUNTIME DESTINATION bin)
-        install(TARGETS redis_async_tests RUNTIME DESTINATION bin)
-        install(TARGETS redis_value_tests RUNTIME DESTINATION bin)
-        install(TARGETS redis_log_on_tests RUNTIME DESTINATION bin)
-        install(TARGETS redis_log_off_tests RUNTIME DESTINATION bin)
-        install(TARGETS redis_log_rt_tests RUNTIME DESTINATION bin)
-    endif()
+    foreach(test_target IN LISTS REDIS_ASIO_TEST_TARGETS)
+        gtest_discover_tests(${test_target})
+        if(REDIS_ASIO_INSTALL_TESTS)
+            install(TARGETS ${test_target} RUNTIME DESTINATION bin)
+        endif()
+    endforeach()
 endif()
 
 if(REDIS_ASIO_BUILD_EXAMPLES)
@@ -195,6 +157,9 @@ endif()
 
 if(REDIS_ASIO_BUILD_BENCHMARKS)
     find_package(benchmark CONFIG QUIET)
+    if(NOT benchmark_FOUND)
+        message(FATAL_ERROR "Google Benchmark (benchmark::benchmark) not found. Install it via vcpkg or disable REDIS_ASIO_BUILD_BENCHMARKS.")
+    endif()
     add_executable(redis_value_bench benchmarks/redis_value_bench.cpp)
     target_include_directories(redis_value_bench
         PUBLIC

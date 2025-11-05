@@ -23,10 +23,17 @@ class HiredisAsioAdapter : public std::enable_shared_from_this<HiredisAsioAdapte
     void stop();
 
   private:
+    void enable_read();
+    void disable_read();
+    void enable_write();
+    void disable_write();
     void start_wait_read();
     void start_wait_write();
 
   private:
+#ifdef REDIS_ASIO_TEST_ACCESS
+    friend struct HiredisAsioAdapterTestAccess;
+#endif
     executor_type exec_;
     redisAsyncContext *ctx_{};
     int fd_{-1};

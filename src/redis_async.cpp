@@ -3,6 +3,8 @@
 #include "redis_value.hpp"
 
 #include <boost/system/error_code.hpp>
+#include <cassert>
+#include <cstring>
 #include <random>
 
 namespace redis_asio {
@@ -417,35 +419,39 @@ void RedisAsyncConnection::issue_unsub(const char *verb,
     const bool is_punsub = ::strcasecmp(verb, "PUNSUBSCRIBE") == 0;
 
     // For UNSUB/PUNSUB, create or replace a long-lived baton stored in the map.
+    std::unique_ptr<UnsubBaton> baton;
     UnsubBaton *priv = nullptr;
     if (is_unsub || is_punsub) {
-        auto baton = std::make_unique<UnsubBaton>();
+        baton = std::make_unique<UnsubBaton>();
         baton->w = weak_from_this();
         baton->on_ack = std::move(cb);
         baton->subject = std::string(subject);
         baton->is_pattern = is_punsub;
         priv = baton.get();
-        if (is_punsub)
-            pch_unsub_batons_[baton->subject] = std::move(baton);
-        else if (is_unsub)
-            ch_unsub_batons_[baton->subject] = std::move(baton);
     } else {
         assert(is_unsub || is_punsub); // only UNSUBSCRIBE or UNPSUBSCRIBE supported here
     }
     // Helper: parse first element string of a reply (ARRAY or PUSH)
     // IMPORTANT: For UNSUB/PUNSUB, hiredis invokes THIS callback only on error
     // We keep baton_raw valid in the map until (P)UNSUBSCRIBE is acked (or error).
-    if (redisAsyncCommand(ctx_, &RedisAsyncConnection::handle_unsub_reply, priv, "%s %s", verb, std::string(subject).c_str()) != REDIS_OK) {
+    assert(baton);
+    const char *argvs[2] = {verb, baton->subject.c_str()};
+    size_t arglens[2] = {std::strlen(verb), baton->subject.size()};
+    if (redisAsyncCommandArgv(ctx_, &RedisAsyncConnection::handle_unsub_reply, priv, 2, argvs, arglens) != REDIS_OK) {
         REDIS_ERROR_RT(log_, "{} submit failed for '{}'", verb, subject);
-        // Undo baton on submission failure
-        if (is_punsub)
-            pch_unsub_batons_.erase(std::string(subject));
-        else if (is_unsub)
-            ch_unsub_batons_.erase(std::string(subject));
+        if (baton) {
+            auto handler = std::move(baton->on_ack);
+            if (handler) {
+                detail::complete_on_associated(std::move(handler), strand_, make_error(error_category::errc::protocol_error));
+            }
+        }
+        return;
     }
-    if (cb)
-        detail::complete_on_associated(std::move(cb), strand_, make_error(error_category::errc::protocol_error));
-    // asio::post(strand_, [cb = std::move(cb)]() mutable { cb(make_error(error_category::errc::protocol_error)); });
+    const std::string key = baton->subject;
+    if (is_punsub)
+        pch_unsub_batons_[key] = std::move(baton);
+    else if (is_unsub)
+        ch_unsub_batons_[key] = std::move(baton);
 }
 
 void RedisAsyncConnection::handle_unsub_reply(redisAsyncContext *c, void *r, void *priv) {
@@ -511,18 +517,15 @@ void RedisAsyncConnection::issue_sub(const char *verb,
     const bool is_psub = ::strcasecmp(verb, "PSUBSCRIBE") == 0;
 
     // For SUB/PSUB, create or replace a long-lived baton stored in the map.
+    std::unique_ptr<SubBaton> baton;
     SubBaton *priv = nullptr;
     if (is_sub || is_psub) {
-        auto baton = std::make_unique<SubBaton>();
+        baton = std::make_unique<SubBaton>();
         baton->w = weak_from_this();
         baton->on_ack = std::move(cb);
         baton->subject = std::string(subject);
         baton->is_pattern = is_psub;
         priv = baton.get();
-        if (is_psub)
-            pch_batons_[baton->subject] = std::move(baton);
-        else if (is_sub)
-            ch_batons_[baton->subject] = std::move(baton);
     } else {
         assert(is_sub || is_psub); // only SUBSCRIBE or PSUBSCRIBE supported here
     }
@@ -530,17 +533,24 @@ void RedisAsyncConnection::issue_sub(const char *verb,
 
     // IMPORTANT: For SUB/PSUB, hiredis invokes THIS callback repeatedly for publishes.
     // We keep baton_raw valid in the map until (P)UNSUBSCRIBE is acked (or error).
-    if (redisAsyncCommand(ctx_, &RedisAsyncConnection::handle_sub_reply, priv, "%s %s", verb, std::string(subject).c_str()) != REDIS_OK) {
+    assert(baton);
+    const char *argvs[2] = {verb, baton->subject.c_str()};
+    size_t arglens[2] = {std::strlen(verb), baton->subject.size()};
+    if (redisAsyncCommandArgv(ctx_, &RedisAsyncConnection::handle_sub_reply, priv, 2, argvs, arglens) != REDIS_OK) {
         REDIS_ERROR_RT(log_, "{} submit failed for '{}'", verb, subject);
-        // Undo baton on submission failure
-        if (is_psub)
-            pch_batons_.erase(std::string(subject));
-        else if (is_sub)
-            ch_batons_.erase(std::string(subject));
+        if (baton) {
+            auto handler = std::move(baton->on_ack);
+            if (handler) {
+                detail::complete_on_associated(std::move(handler), strand_, make_error(error_category::errc::protocol_error));
+            }
+        }
+        return;
     }
-    if (cb)
-        detail::complete_on_associated(std::move(cb), strand_, make_error(error_category::errc::protocol_error));
-    // asio::post(strand_, [cb = std::move(cb)]() mutable { cb(make_error(error_category::errc::protocol_error)); });
+    const std::string key = baton->subject;
+    if (is_psub)
+        pch_batons_[key] = std::move(baton);
+    else if (is_sub)
+        ch_batons_[key] = std::move(baton);
 }
 
 void RedisAsyncConnection::handle_sub_reply(redisAsyncContext *c, void *r, void *priv) {

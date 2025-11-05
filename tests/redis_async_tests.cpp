@@ -335,6 +335,48 @@ TEST(Unit, UnsubscribeAckErasesBatonsAndNotifies) {
     EXPECT_EQ(RedisAsyncConnectionTestAccess::unsub_count(*conn, false), 0u);
 }
 
+TEST(Unit, UnsubscribeAckFiresOnlyOnce) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
+
+    redisAsyncContext fake_ctx{};
+    fake_ctx.data = conn.get();
+
+    auto *sub_baton = RedisAsyncConnectionTestAccess::emplace_sub(*conn, "dup.chan", false, conn);
+    sub_baton->acked = true;
+    auto *unsub_baton = RedisAsyncConnectionTestAccess::emplace_unsub(*conn, "dup.chan", false, conn);
+
+    int ack_count = 0;
+    unsub_baton->on_ack = [&](std::error_code ec) {
+        EXPECT_FALSE(ec);
+        ++ack_count;
+    };
+
+    redisReply kind{};
+    kind.type = REDIS_REPLY_STRING;
+    const char *kind_text = "unsubscribe";
+    kind.str = const_cast<char *>(kind_text);
+    kind.len = std::strlen(kind_text);
+
+    redisReply *elements[1] = {&kind};
+    redisReply root{};
+    root.type = REDIS_REPLY_ARRAY;
+    root.elements = 1;
+    root.element = elements;
+
+    RedisAsyncConnectionTestAccess::call_sub(&fake_ctx, sub_baton, &root);
+    ioc.run();
+    EXPECT_EQ(ack_count, 1);
+    EXPECT_EQ(RedisAsyncConnectionTestAccess::sub_count(*conn, false), 0u);
+    EXPECT_EQ(RedisAsyncConnectionTestAccess::unsub_count(*conn, false), 0u);
+
+    ioc.restart();
+    RedisAsyncConnectionTestAccess::call_sub(&fake_ctx, nullptr, &root);
+    ioc.run();
+    EXPECT_EQ(ack_count, 1);
+}
+
 TEST(Unit, PatternUnsubscribeAckErasesBatonsAndNotifies) {
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;

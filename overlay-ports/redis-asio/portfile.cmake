@@ -1,6 +1,7 @@
 vcpkg_check_features(OUT_FEATURE_OPTIONS FEATURE_OPTIONS
     FEATURES
     tests REDIS_ASIO_BUILD_TESTS
+    tests REDIS_ASIO_INSTALL_TESTS
     examples REDIS_ASIO_BUILD_EXAMPLES
     benchmarks REDIS_ASIO_BUILD_BENCHMARKS
     sanitize REDIS_ASIO_SANITIZE
@@ -43,21 +44,29 @@ vcpkg_install_copyright(FILE_LIST "${SOURCE_PATH}/LICENSE")
 
 # Optionally install test/example executables under tools/<port>
 if("tests" IN_LIST FEATURES)
-    # Ensure the target exists in your CMake when REDIS_ASIO_BUILD_TESTS=ON
-    # vcpkg_cmake_build(TARGETS redis_asio_tests)
-    vcpkg_copy_tools(TOOL_NAMES redis_asio_tests SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin AUTO_CLEAN)
-    vcpkg_copy_tools(TOOL_NAMES redis_async_tests SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin AUTO_CLEAN)
-    vcpkg_copy_tools(TOOL_NAMES redis_log_on_tests SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin AUTO_CLEAN)
-    vcpkg_copy_tools(TOOL_NAMES redis_log_off_tests SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin AUTO_CLEAN)
-    vcpkg_copy_tools(TOOL_NAMES redis_log_rt_tests SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin AUTO_CLEAN)
-    vcpkg_copy_tools(TOOL_NAMES redis_value_tests SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin AUTO_CLEAN)
+    # Ensure the targets exist when REDIS_ASIO_BUILD_TESTS=ON
+    set(_redis_asio_test_tools
+        redis_asio_tests
+        redis_async_tests
+        redis_log_on_tests
+        redis_log_off_tests
+        redis_log_rt_tests
+        redis_value_tests
+        hiredis_asio_adapter_tests
+    )
+    foreach(test_tool IN LISTS _redis_asio_test_tools)
+        vcpkg_copy_tools(TOOL_NAMES ${test_tool} SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin AUTO_CLEAN)
+    endforeach()
 endif()
 
 if("benchmarks" IN_LIST FEATURES)
-    # Ensure the target exists in your CMake when REDIS_ASIO_BUILD_TESTS=ON
-    # vcpkg_cmake_build(TARGETS redis_asio_tests)
-    vcpkg_copy_tools(TOOL_NAMES redis_async_bench SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin AUTO_CLEAN)
-    vcpkg_copy_tools(TOOL_NAMES redis_value_bench SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin AUTO_CLEAN)
+    set(_redis_asio_bench_tools
+        redis_async_bench
+        redis_value_bench
+    )
+    foreach(bench_tool IN LISTS _redis_asio_bench_tools)
+        vcpkg_copy_tools(TOOL_NAMES ${bench_tool} SEARCH_DIR ${CURRENT_PACKAGES_DIR}/bin AUTO_CLEAN)
+    endforeach()
 endif()
 
 if("examples" IN_LIST FEATURES)

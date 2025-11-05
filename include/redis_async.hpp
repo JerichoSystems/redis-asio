@@ -33,7 +33,9 @@ namespace redis_asio {
 namespace asio = boost::asio;
 using tcp = asio::ip::tcp;
 
+#ifdef REDIS_ASIO_TEST_ACCESS
 struct RedisAsyncConnectionTestAccess;
+#endif
 
 // Forward decls
 // struct RedisValue; // defined in redis_value.hpp
@@ -407,7 +409,9 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     void schedule_next_ping();
 
   private:
+#ifdef REDIS_ASIO_TEST_ACCESS
     friend struct RedisAsyncConnectionTestAccess;
+#endif
 
     asio::strand<executor_type> strand_;
     asio::steady_timer reconnect_timer_;

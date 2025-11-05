@@ -20,24 +20,25 @@ executors:
     environment:
       CMAKE_GENERATOR: Ninja
       VCPKG_FEATURE_FLAGS: manifests,binarycaching
-      VCPKG_MANIFEST_FEATURES: tests;examples;benchmarks;
+      VCPKG_MANIFEST_FEATURES: tests;examples;benchmarks
       VCPKG_OVERLAY_PORTS: /home/circleci/project/overlay-ports
       VCPKG_BINARY_SOURCES: "clear;files,/home/circleci/.vcpkg-cache,readwrite"
       # Integration tests target the sidecar service
       REDIS_HOST: 127.0.0.1
       REDIS_PORT: "6379"
   # macos:
-  #   macos:
-  #     xcode: "16.4.0"
-  #   resource_class: m4pro.medium
-  #   environment:
-  #     CMAKE_GENERATOR: Ninja
-  #     VCPKG_FEATURE_FLAGS: manifests,binarycaching
-  #     VCPKG_OVERLAY_PORTS: /Users/distiller/project/overlay-ports
-  #     VCPKG_MANIFEST_FEATURES: tests;examples;benchmarks;
-  #     VCPKG_BINARY_SOURCES: "clear;files,/Users/distiller/.vcpkg-cache,readwrite"
-  #     REDIS_HOST: 127.0.0.1
-  #     REDIS_PORT: "6379"
+  macos:
+    macos:
+      xcode: "16.4.0"
+    resource_class: m4pro.medium
+    environment:
+      CMAKE_GENERATOR: Ninja
+      VCPKG_FEATURE_FLAGS: manifests,binarycaching
+      VCPKG_OVERLAY_PORTS: /Users/distiller/project/overlay-ports
+      VCPKG_MANIFEST_FEATURES: tests;examples;benchmarks
+      VCPKG_BINARY_SOURCES: "clear;files,/Users/distiller/.vcpkg-cache,readwrite"
+      REDIS_HOST: 127.0.0.1
+      REDIS_PORT: "6379"
 
 commands:
   install_tooling_linux:
@@ -48,13 +49,13 @@ commands:
             sudo apt-get update
             sudo apt-get install -y git cmake ninja-build ccache pkg-config curl zip unzip \
               python3 redis-tools linux-libc-dev
-  # install_tooling_macos:
-  #   steps:
-  #     - run:
-  #         name: Install build tools
-  #         command: |
-  #           brew update
-  #           brew install cmake ninja ccache
+  install_tooling_macos:
+    steps:
+      - run:
+          name: Install build tools
+          command: |
+            brew update
+            brew install cmake ninja ccache redis
 
   fetch_bootstrap_vcpkg:
     parameters:
@@ -146,7 +147,7 @@ jobs:
           name: vcpkg install (manifest)
           command: |
             export VCPKG_ROOT="$PWD/vcpkg"
-            export VCPKG_MANIFEST_FEATURES="tests;examples;benchmarks;"
+            export VCPKG_MANIFEST_FEATURES="tests;examples;benchmarks"
             export VCPKG_OVERLAY_PORTS="${VCPKG_OVERLAY_PORTS}"
             "$VCPKG_ROOT"/vcpkg install
       - save_vcpkg_cache
@@ -178,56 +179,55 @@ jobs:
                 path: build/Testing
                 when: on_fail
 
-#   macos-build:
-#     macos:
-#       xcode: 16.4.0  # or your image
-#     resource_class: m4pro.medium
-#     parameters:
-#       build_type:
-#         type: string
-#         default: Debug
-#         enum: [Debug, Release]
-#     environment:
-#       REDIS_HOST: 127.0.0.1
-#       REDIS_PORT: 6379
-#     steps:
-#       - checkout
-#       - run: brew update
-#       - run: brew install redis
-#       - run: |
-#           redis-server --port 6379 --save "" --appendonly no --daemonize yes
-#           for i in {1..30}; do redis-cli ping && break || sleep 1; done
-#       - install_tooling_macos
-#       - fetch_bootstrap_vcpkg
-#       - restore_vcpkg_cache
-#       - restore_ccache
-# 
-#       - run:
-#           name: vcpkg install (manifest)
-#           command: |
-#             export VCPKG_ROOT="$PWD/vcpkg"
-#             export VCPKG_MANIFEST_FEATURES="tests;examples;benchmarks;"
-#             export VCPKG_OVERLAY_PORTS="${VCPKG_OVERLAY_PORTS}"
-#             "$VCPKG_ROOT"/vcpkg install
-#       - save_vcpkg_cache
-# 
-#       - run:
-#           name: Configure CMake
-#           command: |
-#             cmake -S . -B build \
-#               -G Ninja \
-#               -DCMAKE_BUILD_TYPE=<< parameters.build_type >> \
-#               -DREDIS_ASIO_BUILD_TESTS=ON \
-#               -DREDIS_ASIO_BUILD_EXAMPLES=ON \
-#               -DREDIS_ASIO_SANITIZE=OFF \
-#               -DVCPKG_MANIFEST_FEATURES="${VCPKG_MANIFEST_FEATURES}" \
-#               -DCMAKE_TOOLCHAIN_FILE="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake" \
-#               -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
-#       - run: cmake --build build -j
-#       - run:
-#           name: Run unit tests
-#           command: ctest --test-dir build --output-on-failure -j 2
-#       - save_ccache
+  macos-build:
+    executor: macos
+    parameters:
+      build_type:
+        type: string
+        default: Debug
+        enum: [Debug, Release]
+    steps:
+      - checkout
+      - install_tooling_macos
+      - run:
+          name: Start Redis
+          command: |
+            redis-server --port 6379 --save "" --appendonly no --daemonize yes
+            for i in {1..60}; do
+              if redis-cli -p 6379 ping >/dev/null 2>&1; then
+                echo "Redis is ready"
+                break
+              fi
+              sleep 0.5
+            done
+      - fetch_bootstrap_vcpkg
+      - restore_vcpkg_cache
+      - restore_ccache
+      - run:
+          name: vcpkg install (manifest)
+          command: |
+            export VCPKG_ROOT="$PWD/vcpkg"
+            export VCPKG_MANIFEST_FEATURES="tests;examples;benchmarks"
+            export VCPKG_OVERLAY_PORTS="${VCPKG_OVERLAY_PORTS}"
+            "$VCPKG_ROOT"/vcpkg install
+      - save_vcpkg_cache
+      - run:
+          name: Configure CMake
+          command: |
+            cmake -S . -B build \
+              -G Ninja \
+              -DCMAKE_BUILD_TYPE=<< parameters.build_type >> \
+              -DREDIS_ASIO_BUILD_TESTS=ON \
+              -DREDIS_ASIO_BUILD_EXAMPLES=ON \
+              -DREDIS_ASIO_SANITIZE=OFF \
+              -DVCPKG_MANIFEST_FEATURES="${VCPKG_MANIFEST_FEATURES}" \
+              -DCMAKE_TOOLCHAIN_FILE="$PWD/vcpkg/scripts/buildsystems/vcpkg.cmake" \
+              -DCMAKE_CXX_COMPILER_LAUNCHER=ccache
+      - run: cmake --build build -j
+      - run:
+          name: Run unit tests
+          command: ctest --test-dir build --output-on-failure -j 2
+      - save_ccache
 
   linux-sanitizers:
     executor: linux
@@ -241,7 +241,7 @@ jobs:
           name: vcpkg install (tests feature only)
           command: |
             export VCPKG_ROOT="$PWD/vcpkg"
-            export VCPKG_MANIFEST_FEATURES="tests;examples;benchmarks;"
+            export VCPKG_MANIFEST_FEATURES="tests;examples;benchmarks"
             export VCPKG_OVERLAY_PORTS="${VCPKG_OVERLAY_PORTS}"
             # If you want to trim features for this job, you can add a minimal smoke vcpkg.json; otherwise:
             "$VCPKG_ROOT"/vcpkg install
@@ -300,12 +300,12 @@ workflows:
       # - linux-build:
       #     name: Linux • Release
       #     build_type: Release
-      # - macos-build:
-      #     name: macOS • Debug
-      #     build_type: Debug
-      # - macos-build:
-      #     name: macOS • Release
-      #     build_type: Release
+      - macos-build:
+          name: macOS • Debug
+          build_type: Debug
+      - macos-build:
+          name: macOS • Release
+          build_type: Release
       - linux-sanitizers:
           name: Linux • Sanitizers
       - port-smoke-overlay:
