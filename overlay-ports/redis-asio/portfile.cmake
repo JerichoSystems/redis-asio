@@ -15,7 +15,7 @@ else()
     vcpkg_from_github(
         OUT_SOURCE_PATH SOURCE_PATH
         REPO jerichosystems/redis-asio
-        REF v0.1.10
+        REF v0.1.11
         SHA512 0 # fill when publishing a tag
     )
 endif()

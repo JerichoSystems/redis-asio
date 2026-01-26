@@ -1,12 +1,12 @@
 {
   "name": "redis-asio",
-  "version-semver": "0.1.10",
+  "version-semver": "0.1.11",
   "description": "Redis client on Boost.Asio with awaitable API",
   "homepage": "https://github.com/jerichosystems/redis_asio",
   "dependencies": [
     {
       "name": "boost-asio",
-      "version>=": "1.89.0"
+      "version>=": "1.90.0"
     },
     {
       "name": "hiredis",
@@ -39,7 +39,7 @@
         {
           "name": "benchmark",
           "host": true,
-          "version>=": "1.9.4"
+          "version>=": "1.9.5"
         }
       ]
     }
