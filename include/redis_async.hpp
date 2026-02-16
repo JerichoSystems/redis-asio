@@ -13,6 +13,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <deque>
 #include <expected>
 #include <functional>
 #include <iostream>
@@ -46,11 +47,13 @@ class HiredisAsioAdapter;
 class error_category : public std::error_category {
   public:
     enum class errc { ok = 0,
-                      not_connected = 1,
+                      not_connected = 1,   // command gated because connection is not in ready state
                       connect_failed = 2,
                       ssl_error = 3,
-                      protocol_error = 4,
-                      submission_failed = 5,
+                      protocol_error = 4,  // protocol/reply-level issue (e.g. Redis error reply shape mismatch)
+                      submission_failed = 5, // command submission API failed immediately
+                      transport_closed = 6, // transport disconnected/closed while command in flight
+                      queue_overflow = 7,
                       stopped = 125 };
     const char *name() const noexcept override { return "redis_asio"; }
     std::string message(int ev) const override {
@@ -67,6 +70,10 @@ class error_category : public std::error_category {
             return "protocol error";
         case errc::submission_failed:
             return "command submission failed";
+        case errc::transport_closed:
+            return "transport closed";
+        case errc::queue_overflow:
+            return "command queue overflow";
         case errc::stopped:
             return "operation aborted";
         }
@@ -81,6 +88,7 @@ inline const std::error_category &category() {
 inline std::error_code make_error(error_category::errc e) { return {static_cast<int>(e), category()}; }
 inline std::error_code protocol_error() { return make_error(error_category::errc::protocol_error); }
 inline std::error_code submission_failed() { return make_error(error_category::errc::submission_failed); }
+inline std::error_code transport_closed() { return make_error(error_category::errc::transport_closed); }
 
 // ---- Options ----
 /**
@@ -103,6 +111,11 @@ struct TLSOptions {
  * Options controlling how the client connects and reconnects to the Redis server.
  */
 struct ConnectOptions {
+    enum class CommandPolicy {
+        fail_fast,
+        queue_until_ready
+    };
+
     std::string host{"127.0.0.1"};
     uint16_t port{6379};
     std::chrono::milliseconds connect_timeout{std::chrono::seconds(5)};
@@ -115,6 +128,11 @@ struct ConnectOptions {
     std::optional<std::string> username;    // optional; if only password is present -> AUTH default <pwd>
     std::optional<std::string> password;    // optional
     std::optional<std::string> client_name; // optional: sent via HELLO SETNAME
+
+    // command gating behavior while TCP connect / HELLO handshake is in progress.
+    CommandPolicy command_policy{CommandPolicy::fail_fast};
+    // max queued commands when command_policy == queue_until_ready.
+    std::size_t pre_ready_queue_limit{1024};
 };
 
 /**
@@ -187,6 +205,13 @@ inline void complete_on_associated(H &&h, const FallbackExecutor &fallback, Args
 class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConnection> {
   public:
     using executor_type = asio::any_io_executor;
+    enum class ConnectionState {
+        disconnected,
+        connecting_tcp,
+        handshaking_resp3,
+        ready,
+        stopping
+    };
 
     /**
      * Create a connection instance bound to `exec`.
@@ -368,9 +393,13 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     static void handle_connect(const redisAsyncContext *c, int status);
     static void handle_disconnect(const redisAsyncContext *c, int status);
     // static void handle_push(redisAsyncContext *c, void *r);
+    static std::string_view state_name(ConnectionState state) noexcept;
+    void transition_state(ConnectionState next, std::string_view reason);
+    bool is_ready_state() const noexcept { return state_ == ConnectionState::ready; }
 
     // One-roundtrip: HELLO 3 [AUTH user pass|AUTH default pass] [SETNAME name]
     void send_handshake_hello();
+    void handle_handshake_result(std::error_code ec, std::string summary);
     void restore_subscriptions();
 
     // SUB/PSUB helper
@@ -411,6 +440,27 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     // keepalive
     void start_keepalive();
     void schedule_next_ping();
+    using CommandHandler = asio::any_completion_handler<void(std::error_code, RedisValue)>;
+    struct PendingCommand {
+        std::vector<std::string> argv;
+        CommandHandler completion;
+    };
+    struct CommandBaton {
+        CommandHandler completion;
+    };
+    void submit_command_ready(std::vector<std::string> argv, CommandHandler completion);
+    void enqueue_or_reject_command(std::vector<std::string> argv, CommandHandler completion);
+    void drain_pre_ready_queue();
+    void fail_pre_ready_queue(std::error_code ec);
+    bool should_queue_until_ready() const noexcept;
+
+    using RedisAsyncConnectFn = redisAsyncContext *(*)(const char *, int);
+    using RedisAsyncSetConnectCallbackFn = int (*)(redisAsyncContext *, redisConnectCallback *);
+    using RedisAsyncSetDisconnectCallbackFn = int (*)(redisAsyncContext *, redisDisconnectCallback *);
+    using RedisAsyncSetPushCallbackFn = redisAsyncPushFn *(*)(redisAsyncContext *, redisAsyncPushFn *);
+    using RedisAsyncDisconnectFn = void (*)(redisAsyncContext *);
+    using RedisAsyncFreeFn = void (*)(redisAsyncContext *);
+    using RedisAsyncCommandArgvFn = int (*)(redisAsyncContext *, redisCallbackFn *, void *, int, const char **, const size_t *);
 
   private:
 #ifdef REDIS_ASIO_TEST_ACCESS
@@ -428,6 +478,7 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     std::shared_ptr<HiredisAsioAdapter> adapter_;
     redisAsyncContext *ctx_{nullptr};
     redisSSLContext *sslctx_{nullptr};
+    ConnectionState state_{ConnectionState::disconnected};
     std::atomic<bool> connected_{false};
     // one baton per active subject (kept until unsubscribe/punsubscribe)
     std::unordered_map<std::string, std::unique_ptr<SubBaton>> ch_batons_;
@@ -439,6 +490,8 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     std::chrono::milliseconds backoff_{};
     bool stopping_{false};
     bool connect_inflight_{false};
+    uint64_t ctx_generation_{0};
+    std::deque<PendingCommand> pre_ready_queue_;
 
     SubSet ch_;
     SubSet pch_;
@@ -451,6 +504,14 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     std::string hello_summary_;
     Health health_{Health::healthy};
     int ping_failures_{0};
+
+    RedisAsyncConnectFn async_connect_fn_{::redisAsyncConnect};
+    RedisAsyncSetConnectCallbackFn set_connect_callback_fn_{::redisAsyncSetConnectCallback};
+    RedisAsyncSetDisconnectCallbackFn set_disconnect_callback_fn_{::redisAsyncSetDisconnectCallback};
+    RedisAsyncSetPushCallbackFn set_push_callback_fn_{::redisAsyncSetPushCallback};
+    RedisAsyncDisconnectFn async_disconnect_fn_{::redisAsyncDisconnect};
+    RedisAsyncFreeFn async_free_fn_{::redisAsyncFree};
+    RedisAsyncCommandArgvFn async_command_argv_fn_{::redisAsyncCommandArgv};
 
     static void handle_unsub_reply(redisAsyncContext *c, void *r, void *priv);
     static void handle_sub_reply(redisAsyncContext *c, void *r, void *priv);

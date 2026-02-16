@@ -10,9 +10,13 @@ auto RedisAsyncConnection::async_connect(ConnectOptions opts, CompletionToken &&
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, opts = std::move(opts), handler = std::move(handler)]() mutable {
                     auto slot = asio::get_associated_cancellation_slot(handler);
-                    if (self->is_connected()) {
+                    if (self->state_ == ConnectionState::ready) {
                         // complete on handler's associated executor, not on our strand
                         detail::complete_on_associated(std::move(handler), self->strand_, std::error_code{}, true);
+                        return;
+                    }
+                    if (self->stopping_ || self->state_ == ConnectionState::stopping) {
+                        detail::complete_on_associated(std::move(handler), self->strand_, make_error(error_category::errc::stopped), false);
                         return;
                     }
                     // store a wrapper that will later complete on the handler's executor
@@ -56,7 +60,7 @@ auto RedisAsyncConnection::async_wait_connected(CompletionToken &&token) {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, handler = std::move(handler)]() mutable {
                     auto slot = asio::get_associated_cancellation_slot(handler);
-                    if (self->is_connected()) {
+                    if (self->state_ == ConnectionState::ready) {
                         detail::complete_on_associated(std::move(handler), self->strand_, std::error_code{});
                         return;
                     }
@@ -99,7 +103,7 @@ auto RedisAsyncConnection::async_wait_disconnected(CompletionToken &&token) {
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, handler = std::move(handler)]() mutable {
                     auto slot = asio::get_associated_cancellation_slot(handler);
-                    if (!self->is_connected()) {
+                    if (self->state_ != ConnectionState::ready) {
                         detail::complete_on_associated(std::move(handler), self->strand_, std::error_code{});
                         return;
                     }
@@ -317,43 +321,30 @@ auto RedisAsyncConnection::async_command(const std::vector<std::string> &argv, C
             if (auto self = w.lock()) {
                 asio::dispatch(self->strand_, [self, argv, handler = std::move(handler)]() mutable {
                     auto ex_fallback = self->strand_;
-                    if (!self->ctx_ || !self->is_connected()) {
-                        detail::complete_on_associated(std::move(handler), ex_fallback,
-                                                       make_error(error_category::errc::not_connected), RedisValue{});
+                    auto ex_for_handler = boost::asio::get_associated_executor(handler, ex_fallback);
+                    CommandHandler completion{
+                        [h = std::move(handler), ex_for_handler](std::error_code ec, RedisValue value) mutable {
+                            detail::complete_on_associated(std::move(h), ex_for_handler, std::move(ec), std::move(value));
+                        }};
+
+                    if (self->stopping_ || self->state_ == ConnectionState::stopping) {
+                        detail::complete_on_associated(std::move(completion), ex_fallback,
+                                                       make_error(error_category::errc::stopped), RedisValue{});
                         return;
                     }
-                    if (!argv.empty())
-                        REDIS_TRACE_RT(self->log_, "command '{}' argc={} (payload elided)", argv.front(), argv.size());
-                    std::vector<const char *> cargv;
-                    cargv.reserve(argv.size());
-                    std::vector<size_t> alen;
-                    alen.reserve(argv.size());
-                    for (auto &s : argv) {
-                        cargv.push_back(s.data());
-                        alen.push_back(s.size());
-                    }
-                    using Handler = decltype(handler);
-                    struct Ctx {
-                        std::weak_ptr<RedisAsyncConnection> w;
-                        Handler h;
-                        boost::asio::any_io_executor ex;
-                    };
-                    auto ex_for_handler = boost::asio::get_associated_executor(handler, ex_fallback);
-                    auto *baton = new Ctx{self->weak_from_this(), std::move(handler), ex_for_handler};
 
-                    if (redisAsyncCommandArgv(self->ctx_, [](redisAsyncContext *, void *r, void *priv) {
-                            std::unique_ptr<Ctx> holder(static_cast<Ctx *>(priv));
-                            if (!r) {
-                                detail::complete_on_associated(std::move(holder->h), holder->ex,
-                                                               make_error(error_category::errc::protocol_error), RedisValue{});
-                                return;
-                            }
-                            detail::complete_on_associated(std::move(holder->h), holder->ex,
-                                                           std::error_code{}, RedisValue::fromRaw(static_cast<redisReply *>(r))); }, baton, (int)cargv.size(), cargv.data(), reinterpret_cast<const size_t *>(alen.data())) != REDIS_OK) {
-                        std::unique_ptr<Ctx> holder(baton);
-                        detail::complete_on_associated(std::move(holder->h), holder->ex,
-                                                       make_error(error_category::errc::protocol_error), RedisValue{});
+                    if (self->state_ == ConnectionState::ready && self->ctx_) {
+                        self->submit_command_ready(argv, std::move(completion));
+                        return;
                     }
+
+                    if (self->should_queue_until_ready()) {
+                        self->enqueue_or_reject_command(argv, std::move(completion));
+                        return;
+                    }
+
+                    detail::complete_on_associated(std::move(completion), ex_fallback,
+                                                   make_error(error_category::errc::not_connected), RedisValue{});
                 });
             } else {
                 // Connection object already destroyed; complete with operation_aborted.
