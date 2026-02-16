@@ -372,7 +372,7 @@ void RedisAsyncConnection::on_disconnected(int status) {
     disconnect_waiters_.clear();
     for (auto &[id, h] : d) {
         REDIS_TRACE_RT(log_, "notifying disconnect waiter {}", id);
-        detail::complete_on_associated(std::move(h), strand_, make_error(error_category::errc::stopped));
+        detail::complete_on_associated(std::move(h), strand_, std::error_code{});
     }
     connect_inflight_ = false;
     fail_pre_ready_queue(make_error(error_category::errc::transport_closed));

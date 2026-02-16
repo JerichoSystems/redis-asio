@@ -230,6 +230,14 @@ std::optional<std::string> config_value_from_reply(const redis_asio::RedisValue 
     }
     return std::nullopt;
 }
+
+std::optional<std::string> redis_error_message_from_reply(const redis_asio::RedisValue &rv) {
+    if (rv.type != redis_asio::RedisValue::Type::Error)
+        return std::nullopt;
+    if (const auto *s = std::get_if<std::string>(&rv.payload))
+        return *s;
+    return std::nullopt;
+}
 } // namespace
 
 // --- Unit tests (no server needed) ----------------------------------------
@@ -1080,7 +1088,7 @@ TEST(Integration, ReconnectRestoresPsubscriptionsViaClientKill) {
         }
 
         // Wait for disconnect then reconnect
-        EXPECT_TRUE(co_await c_sub->async_wait_disconnected(asio::use_awaitable));
+        EXPECT_FALSE(co_await c_sub->async_wait_disconnected(asio::use_awaitable));
 
         // Give the client time to reconnect; if your impl exposes async_wait_connected, use it:
         EXPECT_FALSE(co_await c_sub->async_wait_connected(asio::use_awaitable));
@@ -1117,8 +1125,10 @@ TEST(Integration, PubSubOutputBufferLimitForcedDisconnectReconnectsNoCrash) {
     auto c_sub = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
     auto c_pub = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
     auto c_ctl = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+    bool skip_test = false;
+    std::string skip_reason;
 
-    asio::co_spawn(ioc, [c_sub, c_pub, c_ctl]() -> asio::awaitable<void> {
+    asio::co_spawn(ioc, [c_sub, c_pub, c_ctl, &skip_test, &skip_reason]() -> asio::awaitable<void> {
         using boost::asio::as_tuple;
         using boost::asio::experimental::awaitable_operators::operator||;
         auto ex = co_await asio::this_coro::executor;
@@ -1133,13 +1143,22 @@ TEST(Integration, PubSubOutputBufferLimitForcedDisconnectReconnectsNoCrash) {
         redis_asio::RedisValue rv;
         std::tie(ec, rv) = co_await c_ctl->async_command({"CONFIG", "GET", "client-output-buffer-limit"}, as_tuple(asio::use_awaitable));
         EXPECT_FALSE(ec);
+        if (auto err = redis_error_message_from_reply(rv)) {
+            skip_test = true;
+            skip_reason = "CONFIG GET not permitted: " + *err;
+            c_sub->stop();
+            c_pub->stop();
+            c_ctl->stop();
+            co_return;
+        }
         if (!ec) {
             if (auto parsed = config_value_from_reply(rv)) {
                 previous_limit = *parsed;
             }
         }
-        EXPECT_TRUE(previous_limit.has_value());
         if (!previous_limit) {
+            skip_test = true;
+            skip_reason = "CONFIG GET client-output-buffer-limit unsupported reply shape";
             c_sub->stop();
             c_pub->stop();
             c_ctl->stop();
@@ -1155,12 +1174,21 @@ TEST(Integration, PubSubOutputBufferLimitForcedDisconnectReconnectsNoCrash) {
             redis_asio::RedisValue restore_rv;
             std::tie(restore_ec, restore_rv) = co_await c_ctl->async_command(restore, as_tuple(asio::use_awaitable));
             EXPECT_FALSE(restore_ec);
+            EXPECT_FALSE(redis_error_message_from_reply(restore_rv).has_value());
         };
 
         std::tie(ec, rv) = co_await c_ctl->async_command(
             {"CONFIG", "SET", "client-output-buffer-limit", "normal 0 0 0 slave 0 0 0 pubsub 1024 1024 1"},
             as_tuple(asio::use_awaitable));
         EXPECT_FALSE(ec);
+        if (auto err = redis_error_message_from_reply(rv)) {
+            skip_test = true;
+            skip_reason = "CONFIG SET not permitted: " + *err;
+            c_sub->stop();
+            c_pub->stop();
+            c_ctl->stop();
+            co_return;
+        }
         limit_modified = !ec;
         if (ec) {
             co_await restore_limit();
@@ -1208,6 +1236,9 @@ TEST(Integration, PubSubOutputBufferLimitForcedDisconnectReconnectsNoCrash) {
         co_return; }, asio::detached);
 
     ioc.run();
+    if (skip_test) {
+        GTEST_SKIP() << skip_reason;
+    }
 }
 
 TEST(Integration, QueueUntilReadyDoesNotDrainBeforeHelloCompletion) {
@@ -1357,6 +1388,154 @@ TEST(Integration, TransientDisconnectDoesNotPoisonSubsequentReadyState) {
 
         std::tie(ec, rv) = co_await c_main->async_command({"PING"}, as_tuple(asio::use_awaitable));
         EXPECT_FALSE(ec);
+        EXPECT_EQ(RedisAsyncConnectionTestAccess::state(*c_main), redis_asio::RedisAsyncConnection::ConnectionState::ready);
+
+        c_main->stop();
+        c_ctl->stop();
+        co_return; }, asio::detached);
+    ioc.run();
+}
+
+TEST(Integration, RepeatedClientKillReconnectStress) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_integration.reconnect_stress");
+    auto c_main = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+    auto c_ctl = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+
+    asio::co_spawn(ioc, [c_main, c_ctl]() -> asio::awaitable<void> {
+        using boost::asio::as_tuple;
+        using boost::asio::experimental::awaitable_operators::operator||;
+        auto ex = co_await asio::this_coro::executor;
+        auto opts = opts_from_env();
+        constexpr int kCycles = 12;
+
+        auto [ec1, a1] = co_await c_main->async_connect(opts, as_tuple(asio::use_awaitable)); EXPECT_FALSE(ec1); (void)a1;
+        auto [ec2, a2] = co_await c_ctl->async_connect(opts, as_tuple(asio::use_awaitable)); EXPECT_FALSE(ec2); (void)a2;
+
+        for (int i = 0; i < kCycles; ++i) {
+            std::error_code ec;
+            redis_asio::RedisValue rv;
+            std::tie(ec, rv) = co_await c_main->async_command({"CLIENT", "ID"}, as_tuple(asio::use_awaitable));
+            EXPECT_FALSE(ec);
+            auto idp = std::get_if<long long>(&rv.payload);
+            EXPECT_TRUE(idp != nullptr);
+            if (!idp)
+                break;
+
+            std::vector<std::string> kill = {"CLIENT", "KILL", "ID", std::to_string(*idp)};
+            std::tie(ec, rv) = co_await c_ctl->async_command(kill, as_tuple(asio::use_awaitable));
+            EXPECT_FALSE(ec);
+
+            asio::steady_timer wait_disconnect(ex);
+            wait_disconnect.expires_after(5s);
+            auto disc = co_await (wait_disconnect.async_wait(as_tuple(asio::use_awaitable))
+                                  || c_main->async_wait_disconnected(as_tuple(asio::use_awaitable)));
+            EXPECT_EQ(disc.index(), 1u);
+            if (disc.index() == 1u) {
+                auto [disc_ec] = std::get<1>(disc);
+                EXPECT_FALSE(disc_ec);
+            }
+
+            asio::steady_timer wait_reconnect(ex);
+            wait_reconnect.expires_after(10s);
+            auto reconn = co_await (wait_reconnect.async_wait(as_tuple(asio::use_awaitable))
+                                    || c_main->async_wait_connected(as_tuple(asio::use_awaitable)));
+            EXPECT_EQ(reconn.index(), 1u);
+            if (reconn.index() == 1u) {
+                auto [reconn_ec] = std::get<1>(reconn);
+                EXPECT_FALSE(reconn_ec);
+            }
+
+            std::tie(ec, rv) = co_await c_main->async_command({"PING"}, as_tuple(asio::use_awaitable));
+            EXPECT_FALSE(ec);
+            EXPECT_EQ(RedisAsyncConnectionTestAccess::state(*c_main), redis_asio::RedisAsyncConnection::ConnectionState::ready);
+        }
+
+        c_main->stop();
+        c_ctl->stop();
+        co_return; }, asio::detached);
+    ioc.run();
+}
+
+TEST(Integration, CommandsDuringReconnectWindowDoNotReturnProtocolError) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_integration.reconnect_cmds");
+    auto c_main = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+    auto c_ctl = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+
+    asio::co_spawn(ioc, [c_main, c_ctl]() -> asio::awaitable<void> {
+        using boost::asio::as_tuple;
+        using boost::asio::experimental::awaitable_operators::operator||;
+        auto ex = co_await asio::this_coro::executor;
+        auto opts = opts_from_env();
+        auto qopts = opts;
+        qopts.command_policy = redis_asio::ConnectOptions::CommandPolicy::queue_until_ready;
+        qopts.pre_ready_queue_limit = 256;
+        constexpr int kCycles = 6;
+
+        auto [ec1, a1] = co_await c_main->async_connect(qopts, as_tuple(asio::use_awaitable)); EXPECT_FALSE(ec1); (void)a1;
+        auto [ec2, a2] = co_await c_ctl->async_connect(opts, as_tuple(asio::use_awaitable)); EXPECT_FALSE(ec2); (void)a2;
+
+        const auto protocol_ec = make_error(redis_asio::error_category::errc::protocol_error);
+        int protocol_errors = 0;
+        int successful_commands = 0;
+
+        for (int i = 0; i < kCycles; ++i) {
+            std::error_code ec;
+            redis_asio::RedisValue rv;
+            std::tie(ec, rv) = co_await c_main->async_command({"CLIENT", "ID"}, as_tuple(asio::use_awaitable));
+            EXPECT_FALSE(ec);
+            auto idp = std::get_if<long long>(&rv.payload);
+            EXPECT_TRUE(idp != nullptr);
+            if (!idp)
+                break;
+
+            std::vector<std::string> kill = {"CLIENT", "KILL", "ID", std::to_string(*idp)};
+            std::tie(ec, rv) = co_await c_ctl->async_command(kill, as_tuple(asio::use_awaitable));
+            EXPECT_FALSE(ec);
+
+            asio::steady_timer wait_disconnect(ex);
+            wait_disconnect.expires_after(5s);
+            auto disc = co_await (wait_disconnect.async_wait(as_tuple(asio::use_awaitable))
+                                  || c_main->async_wait_disconnected(as_tuple(asio::use_awaitable)));
+            EXPECT_EQ(disc.index(), 1u);
+            if (disc.index() == 1u) {
+                auto [disc_ec] = std::get<1>(disc);
+                EXPECT_FALSE(disc_ec);
+            }
+
+            auto reconnect_window_end = std::chrono::steady_clock::now() + 350ms;
+            while (std::chrono::steady_clock::now() < reconnect_window_end) {
+                std::vector<std::string> cmd = {"INCR", "reconnect:window:key"};
+                std::tie(ec, rv) = co_await c_main->async_command(cmd, as_tuple(asio::use_awaitable));
+                if (ec) {
+                    if (ec == protocol_ec)
+                        ++protocol_errors;
+                } else {
+                    ++successful_commands;
+                }
+                asio::steady_timer tiny(ex);
+                tiny.expires_after(5ms);
+                co_await tiny.async_wait(as_tuple(asio::use_awaitable));
+            }
+
+            asio::steady_timer wait_reconnect(ex);
+            wait_reconnect.expires_after(10s);
+            auto reconn = co_await (wait_reconnect.async_wait(as_tuple(asio::use_awaitable))
+                                    || c_main->async_wait_connected(as_tuple(asio::use_awaitable)));
+            EXPECT_EQ(reconn.index(), 1u);
+            if (reconn.index() == 1u) {
+                auto [reconn_ec] = std::get<1>(reconn);
+                EXPECT_FALSE(reconn_ec);
+            }
+            std::tie(ec, rv) = co_await c_main->async_command({"PING"}, as_tuple(asio::use_awaitable));
+            EXPECT_FALSE(ec);
+        }
+
+        EXPECT_EQ(protocol_errors, 0);
+        EXPECT_GT(successful_commands, 0);
         EXPECT_EQ(RedisAsyncConnectionTestAccess::state(*c_main), redis_asio::RedisAsyncConnection::ConnectionState::ready);
 
         c_main->stop();

@@ -47,12 +47,12 @@ class HiredisAsioAdapter;
 class error_category : public std::error_category {
   public:
     enum class errc { ok = 0,
-                      not_connected = 1,
+                      not_connected = 1,   // command gated because connection is not in ready state
                       connect_failed = 2,
                       ssl_error = 3,
-                      protocol_error = 4,
-                      submission_failed = 5,
-                      transport_closed = 6,
+                      protocol_error = 4,  // protocol/reply-level issue (e.g. Redis error reply shape mismatch)
+                      submission_failed = 5, // command submission API failed immediately
+                      transport_closed = 6, // transport disconnected/closed while command in flight
                       queue_overflow = 7,
                       stopped = 125 };
     const char *name() const noexcept override { return "redis_asio"; }
