@@ -29,6 +29,37 @@ The command that receives `READONLY` is not retried by the library. It completes
 
 Automatic replay is intentionally not enabled by default because Redis commands are not uniformly idempotent. If an application wants retries after failover, it should wrap known-safe commands or add explicit per-command retry policy at the application boundary.
 
+### Handling READONLY replies
+
+`async_command()` separates transport/API failures from Redis command replies. A successful `std::error_code` means the client received a Redis reply; it does not mean Redis accepted the command. Redis error replies, including `READONLY`, are returned as `RedisValue::Type::Error`.
+
+When auto-failover is enabled, a `READONLY` reply is treated as a stale-primary signal for the connection. The command that received `READONLY` still completes with that Redis error reply and is not replayed. After that completion, the connection reconnects using the configured reconnect backoff so later commands can land on the primary.
+
+```cpp
+using boost::asio::as_tuple;
+using boost::asio::use_awaitable;
+
+auto [ec, reply] = co_await conn->async_command({"SET", "k", "v"}, as_tuple(use_awaitable));
+if (ec) {
+    // Transport, submission, connection-state, or client-side failure.
+    co_return;
+}
+
+if (reply.type == redis_asio::RedisValue::Type::Error) {
+    const auto *message = std::get_if<std::string>(&reply.payload);
+    if (message && message->starts_with("READONLY")) {
+        // The connection will reconnect when auto-failover is enabled.
+        // Retry only if this command is safe for your application to replay.
+        co_await conn->async_wait_connected(use_awaitable);
+    }
+    co_return;
+}
+```
+
+Application retry wrappers should be explicit and bounded. Retry only commands whose replay semantics are acceptable for the application, usually after `async_wait_connected()` completes. For example, a blind `SET key value` may be safe for some workloads, while `INCR`, queue pops, Lua scripts, transactions, or multi-command workflows can duplicate effects or violate higher-level invariants if replayed automatically.
+
+Keep role polling enabled for primary-bound connections even if write commands are retried by the application. Some traffic, especially Pub/Sub flows, may not reliably surface a stale-primary problem through a write error, so the background `ROLE` check is still part of failover detection.
+
 ## Integration Tests
 
 Redis-backed tests self-provision Valkey containers through Docker by default. The test process starts and reuses a single-node Valkey container for normal Redis integration coverage, starts a native-TLS Valkey container for encrypted connection coverage, and starts an isolated two-node primary/replica Valkey topology for auto-failover tests.
