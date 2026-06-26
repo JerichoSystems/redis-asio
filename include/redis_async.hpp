@@ -453,6 +453,7 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     void issue_role_check();
     void handle_role_probe_result(uint64_t generation, std::error_code ec, std::string role);
     void request_failover_reconnect(std::string reason);
+    void detach_current_context();
     static bool is_role_error_value(const RedisValue &value);
     using CommandHandler = asio::any_completion_handler<void(std::error_code, RedisValue)>;
     struct PendingCommand {

@@ -31,9 +31,11 @@ Automatic replay is intentionally not enabled by default because Redis commands 
 
 ## Integration Tests
 
-Redis-backed tests use the `REDIS_*` environment variables from `tests/redis_async_tests.cpp`, defaulting to `127.0.0.1:6379`. A local Redis/Valkey instance must be running for the `Integration`, `Command`, `PubSub`, and Redis-backed cancellation/concurrency tests.
+Redis-backed tests self-provision Valkey containers through Docker by default. The test process starts and reuses a single-node Valkey container for normal Redis integration coverage, and starts an isolated two-node primary/replica Valkey topology for auto-failover tests.
 
-The repository currently uses direct local Redis/docker-compose style integration tests rather than testcontainers. Testcontainers would make these tests more self-contained, but it should be introduced as a separate test-infrastructure change because it adds a new dependency and changes how CI provisions Redis.
+If Docker is unavailable, Docker-backed tests are skipped. To debug against a manually managed Redis/Valkey instance instead, set `REDIS_ASIO_USE_EXTERNAL_REDIS=1` plus the `REDIS_*` environment variables from `tests/redis_async_tests.cpp`.
+
+The failover tests use a suite-owned stable TCP proxy endpoint in front of the current primary. This lets existing connections remain pinned to the demoted node while new reconnects land on the promoted node, exercising real `READONLY` handling and `ROLE` polling behavior without depending on an external Redis service.
 
 ## Requirements
 - CMake >= 3.21
@@ -41,6 +43,7 @@ The repository currently uses direct local Redis/docker-compose style integratio
 - Boost (Asio)
 - Hiredis & Hiredis SSL
 - GTest (for tests)
+- Docker (for Redis/Valkey-backed tests)
 
 ## Coverage
 

@@ -4,6 +4,7 @@
 #include <boost/asio/experimental/awaitable_operators.hpp>
 
 #include "redis_async.hpp"
+#include "docker_redis_fixture.hpp"
 #include "redis_log.hpp"
 #include "redis_value.hpp"
 
@@ -24,6 +25,9 @@ namespace asio = boost::asio;
 // --- Helpers ---------------------------------------------------------------
 
 static redis_asio::ConnectOptions opts_from_env() {
+    if (const char *external = std::getenv("REDIS_ASIO_USE_EXTERNAL_REDIS"); !external || std::strcmp(external, "1") != 0)
+        return redis_asio_tests::redis_runtime_options();
+
     redis_asio::ConnectOptions o;
     if (const char *h = std::getenv("REDIS_HOST"))
         o.host = h;
@@ -49,6 +53,12 @@ static redis_asio::ConnectOptions opts_from_env() {
         o.tls.key_file = kf;
     return o;
 }
+
+#define REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME()                                                                            \
+    do {                                                                                                                 \
+        if (!redis_asio_tests::redis_runtime_available())                                                                \
+            GTEST_SKIP() << redis_asio_tests::redis_runtime_skip_reason();                                               \
+    } while (false)
 
 static redis_asio::ConnectOptions bogus_opts() {
     redis_asio::ConnectOptions o;
@@ -672,7 +682,7 @@ TEST(Unit, CommandBeforeReadyFailFastReturnsNotConnected) {
     asio::io_context ioc;
     auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
 
-    auto opts = opts_from_env();
+    redis_asio::ConnectOptions opts;
     opts.command_policy = redis_asio::ConnectOptions::CommandPolicy::fail_fast;
     RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
     RedisAsyncConnectionTestAccess::set_state(*conn, redis_asio::RedisAsyncConnection::ConnectionState::connecting_tcp);
@@ -697,7 +707,7 @@ TEST(Unit, QueueUntilReadyDrainsAfterHelloInOrder) {
     redisAsyncContext fake_ctx{};
     fake_ctx.data = conn.get();
 
-    auto opts = opts_from_env();
+    redis_asio::ConnectOptions opts;
     opts.command_policy = redis_asio::ConnectOptions::CommandPolicy::queue_until_ready;
     opts.pre_ready_queue_limit = 8;
     RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
@@ -807,7 +817,7 @@ TEST(Unit, StopWhileReconnectTimerPendingDoesNotReconnect) {
     asio::io_context ioc;
     auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
 
-    auto opts = opts_from_env();
+    redis_asio::ConnectOptions opts;
     opts.reconnect_initial = 20ms;
     opts.reconnect_max = 20ms;
     RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
@@ -849,7 +859,7 @@ TEST(Unit, QueueOverflowDeterministic) {
     asio::io_context ioc;
     auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
 
-    auto opts = opts_from_env();
+    redis_asio::ConnectOptions opts;
     opts.command_policy = redis_asio::ConnectOptions::CommandPolicy::queue_until_ready;
     opts.pre_ready_queue_limit = 2;
     RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
@@ -920,7 +930,7 @@ TEST(Unit, AutoFailoverDisabledIgnoresReadonlyReply) {
     redisAsyncContext fake_ctx{};
     fake_ctx.data = conn.get();
 
-    auto opts = opts_from_env();
+    redis_asio::ConnectOptions opts;
     opts.auto_failover.enabled = false;
     RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
     RedisAsyncConnectionTestAccess::set_ctx(*conn, &fake_ctx);
@@ -960,7 +970,7 @@ TEST(Unit, AutoFailoverHelloMasterAcceptsReadyState) {
     asio::io_context ioc;
     auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
 
-    auto opts = opts_from_env();
+    redis_asio::ConnectOptions opts;
     opts.auto_failover.enabled = true;
     opts.auto_failover.primary_check_interval = 1h;
     RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
@@ -982,7 +992,7 @@ TEST(Unit, AutoFailoverHelloReplicaForcesReconnect) {
     asio::io_context ioc;
     auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
 
-    auto opts = opts_from_env();
+    redis_asio::ConnectOptions opts;
     opts.auto_failover.enabled = true;
     opts.reconnect_initial = 30ms;
     opts.reconnect_max = 30ms;
@@ -1014,7 +1024,7 @@ TEST(Unit, AutoFailoverRoleMasterKeepsReadyAndReschedules) {
     fake_ctx.data = conn.get();
     install_noop_disconnect_hooks(conn);
 
-    auto opts = opts_from_env();
+    redis_asio::ConnectOptions opts;
     opts.auto_failover.enabled = true;
     opts.reconnect_initial = 1ms;
     opts.reconnect_max = 1ms;
@@ -1055,7 +1065,7 @@ TEST(Unit, AutoFailoverRoleReplicaForcesReconnect) {
     fake_ctx.data = conn.get();
     install_noop_disconnect_hooks(conn);
 
-    auto opts = opts_from_env();
+    redis_asio::ConnectOptions opts;
     opts.auto_failover.enabled = true;
     opts.reconnect_initial = 1ms;
     opts.reconnect_max = 1ms;
@@ -1093,7 +1103,7 @@ TEST(Unit, AutoFailoverRoleMalformedForcesReconnect) {
     fake_ctx.data = conn.get();
     install_noop_disconnect_hooks(conn);
 
-    auto opts = opts_from_env();
+    redis_asio::ConnectOptions opts;
     opts.auto_failover.enabled = true;
     opts.reconnect_initial = 1ms;
     opts.reconnect_max = 1ms;
@@ -1130,7 +1140,7 @@ TEST(Unit, AutoFailoverRoleTimeoutForcesReconnect) {
     fake_ctx.data = conn.get();
     install_noop_disconnect_hooks(conn);
 
-    auto opts = opts_from_env();
+    redis_asio::ConnectOptions opts;
     opts.auto_failover.enabled = true;
     opts.reconnect_initial = 1ms;
     opts.reconnect_max = 1ms;
@@ -1165,7 +1175,7 @@ TEST(Unit, AutoFailoverReadonlyReplyPreservesReplyBeforeReconnectAndDoesNotRetry
     fake_ctx.data = conn.get();
     install_noop_disconnect_hooks(conn);
 
-    auto opts = opts_from_env();
+    redis_asio::ConnectOptions opts;
     opts.auto_failover.enabled = true;
     opts.reconnect_initial = 1ms;
     opts.reconnect_max = 1ms;
@@ -1219,7 +1229,7 @@ TEST(Unit, AutoFailoverStopCancelsRoleTimer) {
     fake_ctx.data = conn.get();
     install_noop_disconnect_hooks(conn);
 
-    auto opts = opts_from_env();
+    redis_asio::ConnectOptions opts;
     opts.auto_failover.enabled = true;
     opts.auto_failover.primary_check_interval = 30ms;
     opts.auto_failover.primary_check_jitter = 0ms;
@@ -1243,8 +1253,183 @@ TEST(Unit, AutoFailoverStopCancelsRoleTimer) {
     g_fake_command_env = nullptr;
 }
 
-// --- Integration tests (require running Redis) ----------------------------
+TEST(FailoverIntegration, ReadonlyErrorReconnectsViaBackoffToPromotedPrimaryAndDoesNotRetry) {
+    redis_asio_tests::ValkeyReplicationFixture fixture;
+    if (!fixture.available)
+        GTEST_SKIP() << fixture.skip_reason;
+
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_failover.readonly");
+    auto c = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+
+    asio::co_spawn(ioc, [c, &fixture]() -> asio::awaitable<void> {
+        using boost::asio::as_tuple;
+        auto ex = co_await asio::this_coro::executor;
+
+        auto opts = fixture.proxy_options();
+        opts.auto_failover.enabled = true;
+        opts.auto_failover.primary_check_interval = 250ms;
+        opts.auto_failover.primary_check_jitter = 0ms;
+        opts.auto_failover.primary_check_timeout = 150ms;
+        opts.reconnect_initial = 75ms;
+        opts.reconnect_max = 75ms;
+
+        auto [connect_ec, already] = co_await c->async_connect(opts, as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(connect_ec);
+        EXPECT_FALSE(already);
+
+        std::error_code ec;
+        redis_asio::RedisValue rv;
+        std::tie(ec, rv) = co_await c->async_command({"SET", "failover:readonly", "before"}, as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(ec);
+        EXPECT_FALSE(redis_error_message_from_reply(rv).has_value());
+        fixture.wait_replica_value("failover:readonly", "before");
+
+        fixture.flip_roles();
+
+        std::tie(ec, rv) = co_await c->async_command({"SET", "failover:readonly", "trigger"}, as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(ec);
+        auto readonly = redis_error_message_from_reply(rv);
+        EXPECT_TRUE(readonly.has_value());
+        if (!readonly) {
+            c->stop();
+            co_return;
+        }
+        EXPECT_TRUE(readonly->starts_with("READONLY"));
+
+        asio::steady_timer wait_disconnect(ex);
+        wait_disconnect.expires_after(5s);
+        auto disc = co_await (wait_disconnect.async_wait(as_tuple(asio::use_awaitable))
+                              || c->async_wait_disconnected(as_tuple(asio::use_awaitable)));
+        EXPECT_EQ(disc.index(), 1u);
+        if (disc.index() != 1u) {
+            c->stop();
+            co_return;
+        }
+
+        asio::steady_timer wait_reconnect(ex);
+        wait_reconnect.expires_after(5s);
+        auto reconn = co_await (wait_reconnect.async_wait(as_tuple(asio::use_awaitable))
+                                || c->async_wait_connected(as_tuple(asio::use_awaitable)));
+        EXPECT_EQ(reconn.index(), 1u);
+        if (reconn.index() != 1u) {
+            c->stop();
+            co_return;
+        }
+        if (reconn.index() == 1u) {
+            auto [reconn_ec] = std::get<1>(reconn);
+            EXPECT_FALSE(reconn_ec);
+        }
+
+        std::tie(ec, rv) = co_await c->async_command({"GET", "failover:readonly"}, as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(ec);
+        auto current = redis_asio::string_like(rv);
+        EXPECT_TRUE(current.has_value());
+        if (!current) {
+            c->stop();
+            co_return;
+        }
+        EXPECT_EQ(*current, "before");
+
+        std::tie(ec, rv) = co_await c->async_command({"SET", "failover:readonly", "after"}, as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(ec);
+        EXPECT_FALSE(redis_error_message_from_reply(rv).has_value());
+
+        c->stop();
+        co_return; }, asio::detached);
+
+    ioc.run();
+}
+
+TEST(FailoverIntegration, PubSubConnectionReconnectsViaRolePollingAndRestoresSubscription) {
+    redis_asio_tests::ValkeyReplicationFixture fixture;
+    if (!fixture.available)
+        GTEST_SKIP() << fixture.skip_reason;
+
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_failover.pubsub");
+    auto c_sub = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+    auto c_pub = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+
+    asio::co_spawn(ioc, [c_sub, c_pub, &fixture]() -> asio::awaitable<void> {
+        using boost::asio::as_tuple;
+        auto ex = co_await asio::this_coro::executor;
+
+        auto opts = fixture.proxy_options();
+        opts.auto_failover.enabled = true;
+        opts.auto_failover.primary_check_interval = 100ms;
+        opts.auto_failover.primary_check_jitter = 0ms;
+        opts.auto_failover.primary_check_timeout = 100ms;
+        opts.reconnect_initial = 50ms;
+        opts.reconnect_max = 50ms;
+
+        auto [sub_ec, sub_already] = co_await c_sub->async_connect(opts, as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(sub_ec);
+        EXPECT_FALSE(sub_already);
+        EXPECT_FALSE(co_await c_sub->async_psubscribe({"failover.poll.*"}, asio::use_awaitable));
+
+        fixture.flip_roles();
+
+        asio::steady_timer wait_disconnect(ex);
+        wait_disconnect.expires_after(5s);
+        auto disc = co_await (wait_disconnect.async_wait(as_tuple(asio::use_awaitable))
+                              || c_sub->async_wait_disconnected(as_tuple(asio::use_awaitable)));
+        EXPECT_EQ(disc.index(), 1u);
+        if (disc.index() != 1u) {
+            c_sub->stop();
+            c_pub->stop();
+            co_return;
+        }
+
+        asio::steady_timer wait_reconnect(ex);
+        wait_reconnect.expires_after(5s);
+        auto reconn = co_await (wait_reconnect.async_wait(as_tuple(asio::use_awaitable))
+                                || c_sub->async_wait_connected(as_tuple(asio::use_awaitable)));
+        EXPECT_EQ(reconn.index(), 1u);
+        if (reconn.index() != 1u) {
+            c_sub->stop();
+            c_pub->stop();
+            co_return;
+        }
+
+        auto pub_opts = fixture.proxy_options();
+        auto [pub_ec, pub_already] = co_await c_pub->async_connect(pub_opts, as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(pub_ec);
+        EXPECT_FALSE(pub_already);
+
+        asio::steady_timer settle(ex);
+        settle.expires_after(200ms);
+        co_await settle.async_wait(as_tuple(asio::use_awaitable));
+
+        std::error_code ec;
+        redis_asio::RedisValue rv;
+        std::tie(ec, rv) = co_await c_pub->async_command({"PUBLISH", "failover.poll.1", "after"}, as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(ec);
+
+        asio::steady_timer receive_timeout(ex);
+        receive_timeout.expires_after(5s);
+        auto rx = co_await (receive_timeout.async_wait(as_tuple(asio::use_awaitable))
+                            || c_sub->async_receive_publish(as_tuple(asio::use_awaitable)));
+        EXPECT_EQ(rx.index(), 1u);
+        if (rx.index() == 1u) {
+            auto [rxec, msg] = std::get<1>(rx);
+            EXPECT_FALSE(rxec);
+            EXPECT_EQ(msg.channel, "failover.poll.1");
+            EXPECT_EQ(msg.payload, "after");
+        }
+
+        c_sub->stop();
+        c_pub->stop();
+        co_return; }, asio::detached);
+
+    ioc.run();
+}
+
+// --- Integration tests (self-provision Redis/Valkey with Docker when available) ----------------------------
 TEST(Integration, ConnectDoubleConnectWaiters) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_integration.conn");
@@ -1292,6 +1477,7 @@ TEST(Integration, ConnectDoubleConnectWaiters) {
 }
 
 TEST(Integration, HelloBasicCommandsErrorReply) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_integration.cmd");
@@ -1332,6 +1518,7 @@ TEST(Integration, HelloBasicCommandsErrorReply) {
 }
 
 TEST(Integration, PsubscribePublishReceivePattern) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_integration.psub");
@@ -1383,6 +1570,7 @@ TEST(Integration, PsubscribePublishReceivePattern) {
 }
 
 TEST(Integration, SubscribeRefcountAndUnsubscribeBehavior) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_integration.subref");
@@ -1437,6 +1625,7 @@ TEST(Integration, SubscribeRefcountAndUnsubscribeBehavior) {
 }
 
 TEST(Integration, ReceiveCompletesWithErrorAfterStop) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_integration.stopclose");
@@ -1458,6 +1647,7 @@ TEST(Integration, ReceiveCompletesWithErrorAfterStop) {
 }
 
 TEST(Integration, ReconnectRestoresPsubscriptionsViaClientKill) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_integration.resub");
@@ -1527,6 +1717,7 @@ TEST(Integration, ReconnectRestoresPsubscriptionsViaClientKill) {
 }
 
 TEST(Integration, PubSubOutputBufferLimitForcedDisconnectReconnectsNoCrash) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_integration.pubsub_obuf");
@@ -1650,6 +1841,7 @@ TEST(Integration, PubSubOutputBufferLimitForcedDisconnectReconnectsNoCrash) {
 }
 
 TEST(Integration, QueueUntilReadyDoesNotDrainBeforeHelloCompletion) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_integration.queue_before_hello");
@@ -1743,6 +1935,7 @@ TEST(Integration, QueueUntilReadyDoesNotDrainBeforeHelloCompletion) {
 }
 
 TEST(Integration, TransientDisconnectDoesNotPoisonSubsequentReadyState) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_integration.transient_disconnect");
@@ -1805,6 +1998,7 @@ TEST(Integration, TransientDisconnectDoesNotPoisonSubsequentReadyState) {
 }
 
 TEST(Integration, RepeatedClientKillReconnectStress) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_integration.reconnect_stress");
@@ -1867,6 +2061,7 @@ TEST(Integration, RepeatedClientKillReconnectStress) {
 }
 
 TEST(Integration, CommandsDuringReconnectWindowDoNotReturnProtocolError) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_integration.reconnect_cmds");
@@ -1991,6 +2186,7 @@ echo_once(std::shared_ptr<redis_asio::RedisAsyncConnection> c,
 }
 
 TEST(Concurrency, StrandSerializesHandlersEvenWithTwoThreads) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc(1);
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "strand.serial");
@@ -2108,6 +2304,7 @@ TEST(Cancel, WaitConnectCanceledByCancelAfter) {
 }
 
 TEST(Cancel, WaitDisconnectedCanceledByCancellation) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "cancel.waitdisconcancel");
@@ -2130,6 +2327,7 @@ TEST(Cancel, WaitDisconnectedCanceledByCancellation) {
 }
 
 TEST(Cancel, WaitDisconnectedCanceledByCancelAfter) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "cancel.waitdisconcancelafter");
@@ -2150,6 +2348,7 @@ TEST(Cancel, WaitDisconnectedCanceledByCancelAfter) {
 }
 
 TEST(Cancel, WaitPublishResponseCanceledByCancellation) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "cancel.waitreceivecancel");
@@ -2172,6 +2371,7 @@ TEST(Cancel, WaitPublishResponseCanceledByCancellation) {
 }
 
 TEST(Command, CommandWithArgs) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "command.args");
@@ -2209,6 +2409,7 @@ pipeline_echo_once(int i, std::shared_ptr<std::vector<int>> out, std::shared_ptr
 }
 
 TEST(Command, PipeliningOrder) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "pipeline.order");
@@ -2230,6 +2431,7 @@ TEST(Command, PipeliningOrder) {
 }
 
 TEST(PubSub, BackpressureDropsWhenQueueFull) {
+    REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME();
     redis_asio::RedisAsyncConnection::initOpenSSL();
     asio::io_context ioc;
     auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "ps.backpressure");
