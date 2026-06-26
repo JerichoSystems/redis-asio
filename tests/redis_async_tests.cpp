@@ -140,8 +140,8 @@ struct RedisAsyncConnectionTestAccess {
         conn.schedule_reconnect();
     }
 
-    static void handshake_result(Connection &conn, std::error_code ec, std::string summary) {
-        conn.handle_handshake_result(ec, std::move(summary));
+    static void handshake_result(Connection &conn, std::error_code ec, std::string summary, std::string role = {}) {
+        conn.handle_handshake_result(ec, std::move(summary), std::move(role));
     }
 
     static void on_disconnected(Connection &conn, int status) {
@@ -160,6 +160,22 @@ struct RedisAsyncConnectionTestAccess {
         conn.async_connect_fn_ = fn;
     }
 
+    static void set_connect_callback_fn(Connection &conn, Connection::RedisAsyncSetConnectCallbackFn fn) {
+        conn.set_connect_callback_fn_ = fn;
+    }
+
+    static void set_disconnect_callback_fn(Connection &conn, Connection::RedisAsyncSetDisconnectCallbackFn fn) {
+        conn.set_disconnect_callback_fn_ = fn;
+    }
+
+    static void set_push_callback_fn(Connection &conn, Connection::RedisAsyncSetPushCallbackFn fn) {
+        conn.set_push_callback_fn_ = fn;
+    }
+
+    static void set_async_disconnect_fn(Connection &conn, Connection::RedisAsyncDisconnectFn fn) {
+        conn.async_disconnect_fn_ = fn;
+    }
+
     static void call_handle_connect(redisAsyncContext *ctx, int status) {
         Connection::handle_connect(ctx, status);
     }
@@ -173,13 +189,25 @@ struct RedisAsyncConnectionTestAccess {
 using redis_asio::RedisAsyncConnectionTestAccess;
 
 namespace {
+enum class FakeReplyKind {
+    StatusOk,
+    Error,
+    RoleArray,
+    MalformedArray,
+    Nil
+};
+
 struct FakeCommandEnv {
     std::vector<std::string> submitted;
     bool invoke_with_null_reply{false};
+    FakeReplyKind reply_kind{FakeReplyKind::StatusOk};
+    std::string reply_text{"OK"};
 };
 
 FakeCommandEnv *g_fake_command_env = nullptr;
 std::atomic<int> g_fake_connect_calls{0};
+std::atomic<bool> *g_fake_command_completion_seen = nullptr;
+std::atomic<bool> g_fake_connect_saw_completion{false};
 
 int fake_command_argv(redisAsyncContext *ctx, redisCallbackFn *fn, void *priv, int argc, const char **argv, const size_t *argvlen) {
     if (!g_fake_command_env || argc <= 0 || !argv || !fn)
@@ -194,10 +222,36 @@ int fake_command_argv(redisAsyncContext *ctx, redisCallbackFn *fn, void *priv, i
     }
 
     redisReply reply{};
-    reply.type = REDIS_REPLY_STATUS;
-    const char *ok = "OK";
-    reply.str = const_cast<char *>(ok);
-    reply.len = std::strlen(ok);
+    redisReply first{};
+    redisReply *elements[1] = {&first};
+    switch (g_fake_command_env->reply_kind) {
+    case FakeReplyKind::StatusOk:
+        reply.type = REDIS_REPLY_STATUS;
+        reply.str = g_fake_command_env->reply_text.data();
+        reply.len = g_fake_command_env->reply_text.size();
+        break;
+    case FakeReplyKind::Error:
+        reply.type = REDIS_REPLY_ERROR;
+        reply.str = g_fake_command_env->reply_text.data();
+        reply.len = g_fake_command_env->reply_text.size();
+        break;
+    case FakeReplyKind::RoleArray:
+        first.type = REDIS_REPLY_STRING;
+        first.str = g_fake_command_env->reply_text.data();
+        first.len = g_fake_command_env->reply_text.size();
+        reply.type = REDIS_REPLY_ARRAY;
+        reply.elements = 1;
+        reply.element = elements;
+        break;
+    case FakeReplyKind::MalformedArray:
+        reply.type = REDIS_REPLY_ARRAY;
+        reply.elements = 0;
+        reply.element = nullptr;
+        break;
+    case FakeReplyKind::Nil:
+        reply.type = REDIS_REPLY_NIL;
+        break;
+    }
     fn(ctx, &reply, priv);
     return REDIS_OK;
 }
@@ -207,9 +261,25 @@ int fake_command_argv_submit_fail(redisAsyncContext *, redisCallbackFn *, void *
 }
 
 redisAsyncContext *fake_async_connect_counting(const char *, int) {
+    if (g_fake_command_completion_seen)
+        g_fake_connect_saw_completion.store(g_fake_command_completion_seen->load(), std::memory_order_relaxed);
     ++g_fake_connect_calls;
     return nullptr;
 }
+
+int fake_set_connect_callback(redisAsyncContext *, redisConnectCallback *) {
+    return REDIS_OK;
+}
+
+int fake_set_disconnect_callback(redisAsyncContext *, redisDisconnectCallback *) {
+    return REDIS_OK;
+}
+
+redisAsyncPushFn *fake_set_push_callback(redisAsyncContext *, redisAsyncPushFn *) {
+    return nullptr;
+}
+
+void fake_async_disconnect(redisAsyncContext *) {}
 
 std::optional<std::string> config_value_from_reply(const redis_asio::RedisValue &rv) {
     if (auto *arr = std::get_if<redis_asio::RedisValue::Array>(&rv.payload)) {
@@ -833,6 +903,344 @@ TEST(Unit, QueueOverflowDeterministic) {
     conn->stop();
     ioc.run_for(20ms);
     ioc.restart();
+}
+
+static void install_noop_disconnect_hooks(std::shared_ptr<redis_asio::RedisAsyncConnection> conn) {
+    RedisAsyncConnectionTestAccess::set_connect_callback_fn(*conn, &fake_set_connect_callback);
+    RedisAsyncConnectionTestAccess::set_disconnect_callback_fn(*conn, &fake_set_disconnect_callback);
+    RedisAsyncConnectionTestAccess::set_push_callback_fn(*conn, &fake_set_push_callback);
+    RedisAsyncConnectionTestAccess::set_async_disconnect_fn(*conn, &fake_async_disconnect);
+}
+
+TEST(Unit, AutoFailoverDisabledIgnoresReadonlyReply) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
+
+    redisAsyncContext fake_ctx{};
+    fake_ctx.data = conn.get();
+
+    auto opts = opts_from_env();
+    opts.auto_failover.enabled = false;
+    RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
+    RedisAsyncConnectionTestAccess::set_ctx(*conn, &fake_ctx);
+    RedisAsyncConnectionTestAccess::set_state(*conn, redis_asio::RedisAsyncConnection::ConnectionState::ready);
+    RedisAsyncConnectionTestAccess::set_async_connect_fn(*conn, &fake_async_connect_counting);
+
+    FakeCommandEnv env{};
+    env.reply_kind = FakeReplyKind::Error;
+    env.reply_text = "READONLY You can't write against a read only replica.";
+    g_fake_command_env = &env;
+    RedisAsyncConnectionTestAccess::set_async_command_argv_fn(*conn, &fake_command_argv);
+    g_fake_connect_calls.store(0);
+
+    bool done = false;
+    std::error_code ec;
+    redis_asio::RedisValue rv;
+    conn->async_command({"SET", "k", "v"}, [&](std::error_code e, redis_asio::RedisValue value) {
+        ec = e;
+        rv = std::move(value);
+        done = true;
+    });
+    ioc.run_for(20ms);
+    ioc.restart();
+
+    EXPECT_TRUE(done);
+    EXPECT_FALSE(ec);
+    EXPECT_EQ(rv.type, redis_asio::RedisValue::Type::Error);
+    EXPECT_EQ(g_fake_connect_calls.load(), 0);
+    EXPECT_EQ(RedisAsyncConnectionTestAccess::state(*conn), redis_asio::RedisAsyncConnection::ConnectionState::ready);
+
+    g_fake_command_env = nullptr;
+    RedisAsyncConnectionTestAccess::set_ctx(*conn, nullptr);
+}
+
+TEST(Unit, AutoFailoverHelloMasterAcceptsReadyState) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
+
+    auto opts = opts_from_env();
+    opts.auto_failover.enabled = true;
+    opts.auto_failover.primary_check_interval = 1h;
+    RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
+    RedisAsyncConnectionTestAccess::set_state(*conn, redis_asio::RedisAsyncConnection::ConnectionState::handshaking_resp3);
+
+    RedisAsyncConnectionTestAccess::handshake_result(*conn, {}, "redis 7 proto=3 role=master", "master");
+    ioc.run_for(20ms);
+    ioc.restart();
+
+    EXPECT_TRUE(conn->is_connected());
+    EXPECT_EQ(RedisAsyncConnectionTestAccess::state(*conn), redis_asio::RedisAsyncConnection::ConnectionState::ready);
+    conn->stop();
+    ioc.run_for(20ms);
+    ioc.restart();
+}
+
+TEST(Unit, AutoFailoverHelloReplicaForcesReconnect) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
+
+    auto opts = opts_from_env();
+    opts.auto_failover.enabled = true;
+    opts.reconnect_initial = 30ms;
+    opts.reconnect_max = 30ms;
+    RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
+    RedisAsyncConnectionTestAccess::set_state(*conn, redis_asio::RedisAsyncConnection::ConnectionState::handshaking_resp3);
+    RedisAsyncConnectionTestAccess::set_async_connect_fn(*conn, &fake_async_connect_counting);
+    g_fake_connect_calls.store(0);
+
+    RedisAsyncConnectionTestAccess::handshake_result(*conn, {}, "redis 7 proto=3 role=slave", "slave");
+    ioc.run_for(10ms);
+    ioc.restart();
+
+    EXPECT_FALSE(conn->is_connected());
+    EXPECT_EQ(g_fake_connect_calls.load(), 0);
+
+    ioc.run_for(60ms);
+    ioc.restart();
+
+    EXPECT_FALSE(conn->is_connected());
+    EXPECT_GE(g_fake_connect_calls.load(), 1);
+}
+
+TEST(Unit, AutoFailoverRoleMasterKeepsReadyAndReschedules) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
+
+    redisAsyncContext fake_ctx{};
+    fake_ctx.data = conn.get();
+    install_noop_disconnect_hooks(conn);
+
+    auto opts = opts_from_env();
+    opts.auto_failover.enabled = true;
+    opts.reconnect_initial = 1ms;
+    opts.reconnect_max = 1ms;
+    opts.auto_failover.primary_check_interval = 1ms;
+    opts.auto_failover.primary_check_jitter = 0ms;
+    opts.auto_failover.primary_check_timeout = 50ms;
+    RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
+    RedisAsyncConnectionTestAccess::set_ctx(*conn, &fake_ctx);
+    RedisAsyncConnectionTestAccess::set_state(*conn, redis_asio::RedisAsyncConnection::ConnectionState::handshaking_resp3);
+
+    FakeCommandEnv env{};
+    env.reply_kind = FakeReplyKind::RoleArray;
+    env.reply_text = "master";
+    g_fake_command_env = &env;
+    RedisAsyncConnectionTestAccess::set_async_command_argv_fn(*conn, &fake_command_argv);
+
+    RedisAsyncConnectionTestAccess::handshake_result(*conn, {}, "redis 7 proto=3 role=master", "master");
+    ioc.run_for(10ms);
+    ioc.restart();
+
+    EXPECT_GE(env.submitted.size(), 1u);
+    EXPECT_EQ(env.submitted.front(), "ROLE");
+    EXPECT_EQ(RedisAsyncConnectionTestAccess::state(*conn), redis_asio::RedisAsyncConnection::ConnectionState::ready);
+
+    g_fake_command_env = nullptr;
+    RedisAsyncConnectionTestAccess::set_ctx(*conn, nullptr);
+    conn->stop();
+    ioc.run_for(20ms);
+    ioc.restart();
+}
+
+TEST(Unit, AutoFailoverRoleReplicaForcesReconnect) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
+
+    redisAsyncContext fake_ctx{};
+    fake_ctx.data = conn.get();
+    install_noop_disconnect_hooks(conn);
+
+    auto opts = opts_from_env();
+    opts.auto_failover.enabled = true;
+    opts.reconnect_initial = 1ms;
+    opts.reconnect_max = 1ms;
+    opts.auto_failover.primary_check_interval = 1ms;
+    opts.auto_failover.primary_check_jitter = 0ms;
+    opts.auto_failover.primary_check_timeout = 50ms;
+    RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
+    RedisAsyncConnectionTestAccess::set_ctx(*conn, &fake_ctx);
+    RedisAsyncConnectionTestAccess::set_state(*conn, redis_asio::RedisAsyncConnection::ConnectionState::handshaking_resp3);
+    RedisAsyncConnectionTestAccess::set_async_connect_fn(*conn, &fake_async_connect_counting);
+
+    FakeCommandEnv env{};
+    env.reply_kind = FakeReplyKind::RoleArray;
+    env.reply_text = "slave";
+    g_fake_command_env = &env;
+    RedisAsyncConnectionTestAccess::set_async_command_argv_fn(*conn, &fake_command_argv);
+    g_fake_connect_calls.store(0);
+
+    RedisAsyncConnectionTestAccess::handshake_result(*conn, {}, "redis 7 proto=3 role=master", "master");
+    ioc.run_for(20ms);
+    ioc.restart();
+
+    EXPECT_GE(g_fake_connect_calls.load(), 1);
+    EXPECT_FALSE(conn->is_connected());
+
+    g_fake_command_env = nullptr;
+}
+
+TEST(Unit, AutoFailoverRoleMalformedForcesReconnect) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
+
+    redisAsyncContext fake_ctx{};
+    fake_ctx.data = conn.get();
+    install_noop_disconnect_hooks(conn);
+
+    auto opts = opts_from_env();
+    opts.auto_failover.enabled = true;
+    opts.reconnect_initial = 1ms;
+    opts.reconnect_max = 1ms;
+    opts.auto_failover.primary_check_interval = 1ms;
+    opts.auto_failover.primary_check_jitter = 0ms;
+    opts.auto_failover.primary_check_timeout = 50ms;
+    RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
+    RedisAsyncConnectionTestAccess::set_ctx(*conn, &fake_ctx);
+    RedisAsyncConnectionTestAccess::set_state(*conn, redis_asio::RedisAsyncConnection::ConnectionState::handshaking_resp3);
+    RedisAsyncConnectionTestAccess::set_async_connect_fn(*conn, &fake_async_connect_counting);
+
+    FakeCommandEnv env{};
+    env.reply_kind = FakeReplyKind::MalformedArray;
+    g_fake_command_env = &env;
+    RedisAsyncConnectionTestAccess::set_async_command_argv_fn(*conn, &fake_command_argv);
+    g_fake_connect_calls.store(0);
+
+    RedisAsyncConnectionTestAccess::handshake_result(*conn, {}, "redis 7 proto=3 role=master", "master");
+    ioc.run_for(20ms);
+    ioc.restart();
+
+    EXPECT_GE(g_fake_connect_calls.load(), 1);
+    EXPECT_FALSE(conn->is_connected());
+
+    g_fake_command_env = nullptr;
+}
+
+TEST(Unit, AutoFailoverRoleTimeoutForcesReconnect) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
+
+    redisAsyncContext fake_ctx{};
+    fake_ctx.data = conn.get();
+    install_noop_disconnect_hooks(conn);
+
+    auto opts = opts_from_env();
+    opts.auto_failover.enabled = true;
+    opts.reconnect_initial = 1ms;
+    opts.reconnect_max = 1ms;
+    opts.auto_failover.primary_check_interval = 1ms;
+    opts.auto_failover.primary_check_jitter = 0ms;
+    opts.auto_failover.primary_check_timeout = 5ms;
+    RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
+    RedisAsyncConnectionTestAccess::set_ctx(*conn, &fake_ctx);
+    RedisAsyncConnectionTestAccess::set_state(*conn, redis_asio::RedisAsyncConnection::ConnectionState::handshaking_resp3);
+    RedisAsyncConnectionTestAccess::set_async_connect_fn(*conn, &fake_async_connect_counting);
+
+    g_fake_command_env = nullptr;
+    RedisAsyncConnectionTestAccess::set_async_command_argv_fn(*conn, [](redisAsyncContext *, redisCallbackFn *, void *, int, const char **, const size_t *) {
+        return REDIS_OK;
+    });
+    g_fake_connect_calls.store(0);
+
+    RedisAsyncConnectionTestAccess::handshake_result(*conn, {}, "redis 7 proto=3 role=master", "master");
+    ioc.run_for(50ms);
+    ioc.restart();
+
+    EXPECT_GE(g_fake_connect_calls.load(), 1);
+    EXPECT_FALSE(conn->is_connected());
+}
+
+TEST(Unit, AutoFailoverReadonlyReplyPreservesReplyBeforeReconnectAndDoesNotRetry) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
+
+    redisAsyncContext fake_ctx{};
+    fake_ctx.data = conn.get();
+    install_noop_disconnect_hooks(conn);
+
+    auto opts = opts_from_env();
+    opts.auto_failover.enabled = true;
+    opts.reconnect_initial = 1ms;
+    opts.reconnect_max = 1ms;
+    RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
+    RedisAsyncConnectionTestAccess::set_ctx(*conn, &fake_ctx);
+    RedisAsyncConnectionTestAccess::set_state(*conn, redis_asio::RedisAsyncConnection::ConnectionState::ready);
+    RedisAsyncConnectionTestAccess::set_async_connect_fn(*conn, &fake_async_connect_counting);
+
+    FakeCommandEnv env{};
+    env.reply_kind = FakeReplyKind::Error;
+    env.reply_text = "READONLY You can't write against a read only replica.";
+    g_fake_command_env = &env;
+    RedisAsyncConnectionTestAccess::set_async_command_argv_fn(*conn, &fake_command_argv);
+    g_fake_connect_calls.store(0);
+    g_fake_connect_saw_completion.store(false);
+
+    std::atomic<bool> completion_seen{false};
+    g_fake_command_completion_seen = &completion_seen;
+    bool done = false;
+    std::error_code ec;
+    redis_asio::RedisValue rv;
+    conn->async_command({"SET", "k", "v"}, [&](std::error_code e, redis_asio::RedisValue value) {
+        ec = e;
+        rv = std::move(value);
+        completion_seen.store(true);
+        done = true;
+    });
+    ioc.run_for(20ms);
+    ioc.restart();
+
+    g_fake_command_completion_seen = nullptr;
+    g_fake_command_env = nullptr;
+
+    EXPECT_TRUE(done);
+    EXPECT_FALSE(ec);
+    EXPECT_EQ(rv.type, redis_asio::RedisValue::Type::Error);
+    EXPECT_EQ(redis_error_message_from_reply(rv), env.reply_text);
+    ASSERT_EQ(env.submitted.size(), 1u);
+    EXPECT_EQ(env.submitted[0], "SET");
+    EXPECT_GE(g_fake_connect_calls.load(), 1);
+    EXPECT_TRUE(g_fake_connect_saw_completion.load());
+    EXPECT_FALSE(conn->is_connected());
+}
+
+TEST(Unit, AutoFailoverStopCancelsRoleTimer) {
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto conn = redis_asio::RedisAsyncConnection::create(ioc.get_executor());
+
+    redisAsyncContext fake_ctx{};
+    fake_ctx.data = conn.get();
+    install_noop_disconnect_hooks(conn);
+
+    auto opts = opts_from_env();
+    opts.auto_failover.enabled = true;
+    opts.auto_failover.primary_check_interval = 30ms;
+    opts.auto_failover.primary_check_jitter = 0ms;
+    RedisAsyncConnectionTestAccess::set_opts(*conn, opts);
+    RedisAsyncConnectionTestAccess::set_ctx(*conn, &fake_ctx);
+    RedisAsyncConnectionTestAccess::set_state(*conn, redis_asio::RedisAsyncConnection::ConnectionState::handshaking_resp3);
+
+    FakeCommandEnv env{};
+    env.reply_kind = FakeReplyKind::RoleArray;
+    env.reply_text = "master";
+    g_fake_command_env = &env;
+    RedisAsyncConnectionTestAccess::set_async_command_argv_fn(*conn, &fake_command_argv);
+
+    RedisAsyncConnectionTestAccess::handshake_result(*conn, {}, "redis 7 proto=3 role=master", "master");
+    conn->stop();
+    ioc.run_for(100ms);
+    ioc.restart();
+
+    EXPECT_TRUE(env.submitted.empty());
+
+    g_fake_command_env = nullptr;
 }
 
 // --- Integration tests (require running Redis) ----------------------------

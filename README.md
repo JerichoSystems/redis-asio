@@ -9,6 +9,31 @@ Asynchronous C++ client library for Redis, using Boost.Asio and Hiredis.
 - Asynchronous API using Boost.Asio
 - Hiredis backend
 - Example and test suite included
+- Optional primary auto-failover monitor for non-cluster Redis/Valkey primary-replica deployments
+
+## Primary Auto-Failover
+
+`ConnectOptions::auto_failover` is disabled by default. When enabled, the connection is treated as a primary-only connection for cluster-mode-disabled Redis/Valkey primary-replica deployments:
+
+```cpp
+redis_asio::ConnectOptions opts;
+opts.auto_failover.enabled = true;
+opts.auto_failover.primary_check_interval = std::chrono::seconds(5);
+opts.auto_failover.primary_check_jitter = std::chrono::milliseconds(500);
+opts.auto_failover.primary_check_timeout = std::chrono::seconds(2);
+```
+
+The connection checks the server role from `HELLO 3`, polls `ROLE` while ready, and schedules a reconnect with the configured reconnect backoff when the role is not `master`, a role probe fails or times out, or a normal command returns a role error such as `READONLY`.
+
+The command that receives `READONLY` is not retried by the library. It completes with `ec == 0` and a `RedisValue` whose type is `RedisValue::Type::Error`, then the connection reconnects so subsequent commands use the primary endpoint. Callers must inspect Redis error replies and apply their own retry policy for commands that are safe to replay.
+
+Automatic replay is intentionally not enabled by default because Redis commands are not uniformly idempotent. If an application wants retries after failover, it should wrap known-safe commands or add explicit per-command retry policy at the application boundary.
+
+## Integration Tests
+
+Redis-backed tests use the `REDIS_*` environment variables from `tests/redis_async_tests.cpp`, defaulting to `127.0.0.1:6379`. A local Redis/Valkey instance must be running for the `Integration`, `Command`, `PubSub`, and Redis-backed cancellation/concurrency tests.
+
+The repository currently uses direct local Redis/docker-compose style integration tests rather than testcontainers. Testcontainers would make these tests more self-contained, but it should be introduced as a separate test-infrastructure change because it adds a new dependency and changes how CI provisions Redis.
 
 ## Requirements
 - CMake >= 3.21

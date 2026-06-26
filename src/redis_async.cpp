@@ -4,6 +4,7 @@
 
 #include <boost/system/error_code.hpp>
 #include <cassert>
+#include <cctype>
 #include <cstring>
 #include <random>
 
@@ -24,6 +25,40 @@ std::string_view reply_first_string(redisReply *r) {
         return {head->str, static_cast<size_t>(head->len)};
     return {};
 }
+
+std::string lower_copy(std::string_view s) {
+    std::string out;
+    out.reserve(s.size());
+    for (unsigned char ch : s)
+        out.push_back(static_cast<char>(std::tolower(ch)));
+    return out;
+}
+
+bool is_master_role(std::string_view role) {
+    return lower_copy(role) == "master";
+}
+
+std::string role_from_hello_value(const RedisValue &rv) {
+    if (auto *kv = std::get_if<RedisValue::KVList>(&rv.payload)) {
+        for (auto &[k, v] : *kv) {
+            if (k == "role") {
+                if (auto s = string_like(v))
+                    return lower_copy(*s);
+            }
+        }
+    }
+    return {};
+}
+
+std::string role_from_role_reply(redisReply *r) {
+    if (!r || r->type != REDIS_REPLY_ARRAY || r->elements == 0 || !r->element[0])
+        return {};
+    auto *head = r->element[0];
+    if (head->type != REDIS_REPLY_STRING && head->type != REDIS_REPLY_STATUS)
+        return {};
+    return lower_copy({head->str, static_cast<size_t>(head->len)});
+}
+
 } // namespace
 
 static inline std::chrono::milliseconds next_backoff(std::chrono::milliseconds cur,
@@ -57,6 +92,8 @@ RedisAsyncConnection::RedisAsyncConnection(executor_type exec, std::shared_ptr<L
     : strand_(asio::make_strand(exec)),
       reconnect_timer_(strand_),
       ping_timer_(strand_),
+      role_timer_(strand_),
+      role_probe_timeout_timer_(strand_),
       pub_channel_(strand_, max_backlog),
       log_(std::move(log)) {}
 
@@ -81,6 +118,16 @@ void RedisAsyncConnection::transition_state(ConnectionState next, std::string_vi
         return;
     REDIS_DEBUG_RT(log_, "state {} -> {} ({})", state_name(state_), state_name(next), reason);
     state_ = next;
+}
+
+bool RedisAsyncConnection::is_role_error_value(const RedisValue &value) {
+    if (value.type != RedisValue::Type::Error)
+        return false;
+    const auto *message = std::get_if<std::string>(&value.payload);
+    if (!message)
+        return false;
+    auto lower = lower_copy(*message);
+    return lower == "readonly" || lower.starts_with("readonly ");
 }
 
 bool RedisAsyncConnection::should_queue_until_ready() const noexcept {
@@ -134,8 +181,9 @@ void RedisAsyncConnection::submit_command_ready(std::vector<std::string> argv, C
                                                                       make_error(error_category::errc::transport_closed), RedisValue{});
                                        return;
                                    }
+                                   RedisValue value = RedisValue::fromRaw(static_cast<redisReply *>(r));
                                    detail::complete_on_associated(std::move(holder->completion), boost::asio::system_executor{}, std::error_code{},
-                                                                  RedisValue::fromRaw(static_cast<redisReply *>(r)));
+                                                                  std::move(value));
                                },
                                baton,
                                static_cast<int>(cargv.size()),
@@ -166,6 +214,8 @@ void RedisAsyncConnection::shutdown_from_dtor_() noexcept {
     connected_.store(false, std::memory_order_relaxed);
     reconnect_timer_.cancel();
     ping_timer_.cancel();
+    role_timer_.cancel();
+    role_probe_timeout_timer_.cancel();
     pub_channel_.close();
     fail_pre_ready_queue(make_error(error_category::errc::stopped));
 
@@ -232,6 +282,9 @@ void RedisAsyncConnection::stop() {
         }
         self->reconnect_timer_.cancel();
         self->ping_timer_.cancel();
+        self->role_timer_.cancel();
+        self->role_probe_timeout_timer_.cancel();
+        self->role_probe_inflight_ = false;
         if (self->sslctx_) {
             redisFreeSSLContext(self->sslctx_);
             self->sslctx_ = nullptr;
@@ -363,10 +416,15 @@ void RedisAsyncConnection::on_disconnected(int status) {
     adapter_.reset();
     connected_.store(false, std::memory_order_relaxed);
     hello_summary_.clear();
+    server_role_.clear();
     if (!stopping_) {
         transition_state(ConnectionState::disconnected, "on_disconnected()");
     }
     ping_timer_.cancel();
+    role_timer_.cancel();
+    role_probe_timeout_timer_.cancel();
+    role_probe_inflight_ = false;
+    failover_reconnect_pending_ = false;
 
     auto d = std::move(disconnect_waiters_);
     disconnect_waiters_.clear();
@@ -508,6 +566,7 @@ void RedisAsyncConnection::send_handshake_hello() {
                                    redisReply *reply = static_cast<redisReply *>(r);
                                    std::error_code ec;
                                    std::string summary;
+                                   std::string role;
                                    if (!reply) {
                                        ec = make_error(error_category::errc::transport_closed);
                                    } else if (reply->type == REDIS_REPLY_ERROR) {
@@ -517,7 +576,6 @@ void RedisAsyncConnection::send_handshake_hello() {
                                        if (auto *kv = std::get_if<RedisValue::KVList>(&rv.payload)) {
                                            std::string server;
                                            std::string version;
-                                           std::string role;
                                            std::string mode;
                                            long long proto = 0;
                                            for (auto &[k, v] : *kv) {
@@ -544,9 +602,10 @@ void RedisAsyncConnection::send_handshake_hello() {
                                        } else if (auto s = string_like(rv)) {
                                            summary = *s;
                                        }
+                                       role = role_from_hello_value(rv);
                                    }
-                                   asio::dispatch(self->strand_, [self, ec, summary = std::move(summary)]() mutable {
-                                       self->handle_handshake_result(ec, std::move(summary));
+                                   asio::dispatch(self->strand_, [self, ec, summary = std::move(summary), role = std::move(role)]() mutable {
+                                       self->handle_handshake_result(ec, std::move(summary), std::move(role));
                                    });
                                },
                                nullptr,
@@ -559,10 +618,16 @@ void RedisAsyncConnection::send_handshake_hello() {
     }
 }
 
-void RedisAsyncConnection::handle_handshake_result(std::error_code ec, std::string summary) {
+void RedisAsyncConnection::handle_handshake_result(std::error_code ec, std::string summary, std::string role) {
     if (ec) {
         REDIS_ERROR_RT(log_, "HELLO failed: {}", ec.message());
         on_disconnected(-1);
+        return;
+    }
+    server_role_ = lower_copy(role);
+    if (opts_.auto_failover.enabled && !is_master_role(server_role_)) {
+        REDIS_WARN_RT(log_, "HELLO reported non-primary role '{}'", server_role_.empty() ? "<missing>" : server_role_);
+        request_failover_reconnect("HELLO non-primary role");
         return;
     }
     hello_summary_ = std::move(summary);
@@ -572,6 +637,7 @@ void RedisAsyncConnection::handle_handshake_result(std::error_code ec, std::stri
     REDIS_TRACE_RT(log_, "HELLO ok: {}", hello_summary_);
     restore_subscriptions();
     start_keepalive();
+    start_role_monitor();
     drain_pre_ready_queue();
     auto waiters = std::move(connect_waiters_);
     connect_waiters_.clear();
@@ -870,6 +936,121 @@ void RedisAsyncConnection::schedule_next_ping() {
                 REDIS_WARN_RT(self->log_, "PING submit failed");
                 self->on_disconnected(-1);
             }
+        }
+    });
+}
+
+void RedisAsyncConnection::start_role_monitor() {
+    role_probe_inflight_ = false;
+    role_probe_timeout_timer_.cancel();
+    role_timer_.cancel();
+    if (opts_.auto_failover.enabled)
+        schedule_next_role_check();
+}
+
+void RedisAsyncConnection::schedule_next_role_check() {
+    if (stopping_ || !opts_.auto_failover.enabled || !is_ready_state())
+        return;
+    auto delay = jitter(opts_.auto_failover.primary_check_interval, opts_.auto_failover.primary_check_jitter);
+    role_timer_.expires_after(delay);
+    role_timer_.async_wait([w = weak_from_this()](auto ec) {
+        if (ec)
+            return;
+        if (auto self = w.lock())
+            self->issue_role_check();
+    });
+}
+
+void RedisAsyncConnection::issue_role_check() {
+    if (stopping_ || !opts_.auto_failover.enabled || !is_ready_state() || !ctx_)
+        return;
+    if (role_probe_inflight_)
+        return;
+
+    role_probe_inflight_ = true;
+    const auto generation = ++role_probe_generation_;
+    auto *baton = new RoleProbeBaton{weak_from_this(), generation};
+
+    auto timeout = opts_.auto_failover.primary_check_timeout;
+    if (timeout.count() <= 0)
+        timeout = 1ms;
+    role_probe_timeout_timer_.expires_after(timeout);
+    role_probe_timeout_timer_.async_wait([w = weak_from_this(), generation](auto ec) {
+        if (ec)
+            return;
+        if (auto self = w.lock()) {
+            if (!self->role_probe_inflight_ || self->role_probe_generation_ != generation)
+                return;
+            self->role_probe_inflight_ = false;
+            self->request_failover_reconnect("ROLE check timeout");
+        }
+    });
+
+    static const char *kRoleArgv[] = {"ROLE"};
+    static const size_t kRoleArgLen[] = {4};
+    if (async_command_argv_fn_(ctx_,
+                               [](redisAsyncContext *, void *r, void *priv) {
+                                   std::unique_ptr<RoleProbeBaton> holder(static_cast<RoleProbeBaton *>(priv));
+                                   std::error_code ec;
+                                   std::string role;
+                                   auto *reply = static_cast<redisReply *>(r);
+                                   if (!reply) {
+                                       ec = make_error(error_category::errc::transport_closed);
+                                   } else if (reply->type == REDIS_REPLY_ERROR) {
+                                       ec = make_error(error_category::errc::protocol_error);
+                                   } else {
+                                       role = role_from_role_reply(reply);
+                                       if (role.empty())
+                                           ec = make_error(error_category::errc::protocol_error);
+                                   }
+                                   if (auto self = holder->w.lock()) {
+                                       asio::dispatch(self->strand_, [self, generation = holder->generation, ec, role = std::move(role)]() mutable {
+                                           self->handle_role_probe_result(generation, ec, std::move(role));
+                                       });
+                                   }
+                               },
+                               baton,
+                               1,
+                               kRoleArgv,
+                               kRoleArgLen)
+        != REDIS_OK) {
+        std::unique_ptr<RoleProbeBaton> holder(baton);
+        role_probe_timeout_timer_.cancel();
+        role_probe_inflight_ = false;
+        request_failover_reconnect("ROLE submit failed");
+    }
+}
+
+void RedisAsyncConnection::handle_role_probe_result(uint64_t generation, std::error_code ec, std::string role) {
+    if (!role_probe_inflight_ || role_probe_generation_ != generation)
+        return;
+    role_probe_inflight_ = false;
+    role_probe_timeout_timer_.cancel();
+
+    if (ec || !is_master_role(role)) {
+        REDIS_WARN_RT(log_, "ROLE check failed or reported non-primary role '{}': {}", role.empty() ? "<missing>" : role, ec.message());
+        request_failover_reconnect("ROLE check failed");
+        return;
+    }
+
+    server_role_ = std::move(role);
+    health_ = Health::healthy;
+    schedule_next_role_check();
+}
+
+void RedisAsyncConnection::request_failover_reconnect(std::string reason) {
+    if (stopping_ || !opts_.auto_failover.enabled || failover_reconnect_pending_)
+        return;
+    failover_reconnect_pending_ = true;
+    asio::post(strand_, [w = weak_from_this(), reason = std::move(reason)]() mutable {
+        if (auto self = w.lock()) {
+            if (self->stopping_)
+                return;
+            REDIS_WARN_RT(self->log_, "auto-failover reconnect requested: {}", reason);
+            self->role_timer_.cancel();
+            self->role_probe_timeout_timer_.cancel();
+            self->role_probe_inflight_ = false;
+            self->on_disconnected(REDIS_ERR);
         }
     });
 }
