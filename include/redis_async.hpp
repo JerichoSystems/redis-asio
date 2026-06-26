@@ -453,7 +453,7 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     void issue_role_check();
     void handle_role_probe_result(uint64_t generation, std::error_code ec, std::string role);
     void request_failover_reconnect(std::string reason);
-    void detach_current_context();
+    void close_current_context();
     static bool is_role_error_value(const RedisValue &value);
     using CommandHandler = asio::any_completion_handler<void(std::error_code, RedisValue)>;
     struct PendingCommand {
@@ -477,7 +477,6 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     using RedisAsyncSetConnectCallbackFn = int (*)(redisAsyncContext *, redisConnectCallback *);
     using RedisAsyncSetDisconnectCallbackFn = int (*)(redisAsyncContext *, redisDisconnectCallback *);
     using RedisAsyncSetPushCallbackFn = redisAsyncPushFn *(*)(redisAsyncContext *, redisAsyncPushFn *);
-    using RedisAsyncDisconnectFn = void (*)(redisAsyncContext *);
     using RedisAsyncFreeFn = void (*)(redisAsyncContext *);
     using RedisAsyncCommandArgvFn = int (*)(redisAsyncContext *, redisCallbackFn *, void *, int, const char **, const size_t *);
 
@@ -534,7 +533,6 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     RedisAsyncSetConnectCallbackFn set_connect_callback_fn_{::redisAsyncSetConnectCallback};
     RedisAsyncSetDisconnectCallbackFn set_disconnect_callback_fn_{::redisAsyncSetDisconnectCallback};
     RedisAsyncSetPushCallbackFn set_push_callback_fn_{::redisAsyncSetPushCallback};
-    RedisAsyncDisconnectFn async_disconnect_fn_{::redisAsyncDisconnect};
     RedisAsyncFreeFn async_free_fn_{::redisAsyncFree};
     RedisAsyncCommandArgvFn async_command_argv_fn_{::redisAsyncCommandArgv};
 

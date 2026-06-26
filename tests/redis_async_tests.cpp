@@ -17,6 +17,7 @@
 #include <string>
 #include <thread>
 #include <tuple>
+#include <utility>
 #include <variant>
 
 using namespace std::chrono_literals;
@@ -188,8 +189,8 @@ struct RedisAsyncConnectionTestAccess {
         conn.set_push_callback_fn_ = fn;
     }
 
-    static void set_async_disconnect_fn(Connection &conn, Connection::RedisAsyncDisconnectFn fn) {
-        conn.async_disconnect_fn_ = fn;
+    static void set_async_free_fn(Connection &conn, Connection::RedisAsyncFreeFn fn) {
+        conn.async_free_fn_ = fn;
     }
 
     static void call_handle_connect(redisAsyncContext *ctx, int status) {
@@ -222,8 +223,12 @@ struct FakeCommandEnv {
 
 FakeCommandEnv *g_fake_command_env = nullptr;
 std::atomic<int> g_fake_connect_calls{0};
+std::atomic<int> g_fake_free_calls{0};
 std::atomic<bool> *g_fake_command_completion_seen = nullptr;
 std::atomic<bool> g_fake_connect_saw_completion{false};
+redisCallbackFn *g_deferred_command_fn = nullptr;
+void *g_deferred_command_priv = nullptr;
+redisAsyncContext *g_deferred_command_ctx = nullptr;
 
 int fake_command_argv(redisAsyncContext *ctx, redisCallbackFn *fn, void *priv, int argc, const char **argv, const size_t *argvlen) {
     if (!g_fake_command_env || argc <= 0 || !argv || !fn)
@@ -295,7 +300,15 @@ redisAsyncPushFn *fake_set_push_callback(redisAsyncContext *, redisAsyncPushFn *
     return nullptr;
 }
 
-void fake_async_disconnect(redisAsyncContext *) {}
+void fake_async_free(redisAsyncContext *) {
+    ++g_fake_free_calls;
+    if (g_deferred_command_fn) {
+        auto *fn = std::exchange(g_deferred_command_fn, nullptr);
+        auto *priv = std::exchange(g_deferred_command_priv, nullptr);
+        auto *ctx = std::exchange(g_deferred_command_ctx, nullptr);
+        fn(ctx, nullptr, priv);
+    }
+}
 
 std::optional<std::string> config_value_from_reply(const redis_asio::RedisValue &rv) {
     if (auto *arr = std::get_if<redis_asio::RedisValue::Array>(&rv.payload)) {
@@ -925,7 +938,7 @@ static void install_noop_disconnect_hooks(std::shared_ptr<redis_asio::RedisAsync
     RedisAsyncConnectionTestAccess::set_connect_callback_fn(*conn, &fake_set_connect_callback);
     RedisAsyncConnectionTestAccess::set_disconnect_callback_fn(*conn, &fake_set_disconnect_callback);
     RedisAsyncConnectionTestAccess::set_push_callback_fn(*conn, &fake_set_push_callback);
-    RedisAsyncConnectionTestAccess::set_async_disconnect_fn(*conn, &fake_async_disconnect);
+    RedisAsyncConnectionTestAccess::set_async_free_fn(*conn, &fake_async_free);
 }
 
 TEST(Unit, AutoFailoverDisabledIgnoresReadonlyReply) {
@@ -1159,7 +1172,13 @@ TEST(Unit, AutoFailoverRoleTimeoutForcesReconnect) {
     RedisAsyncConnectionTestAccess::set_async_connect_fn(*conn, &fake_async_connect_counting);
 
     g_fake_command_env = nullptr;
-    RedisAsyncConnectionTestAccess::set_async_command_argv_fn(*conn, [](redisAsyncContext *, redisCallbackFn *, void *, int, const char **, const size_t *) {
+    g_deferred_command_fn = nullptr;
+    g_deferred_command_priv = nullptr;
+    g_deferred_command_ctx = nullptr;
+    RedisAsyncConnectionTestAccess::set_async_command_argv_fn(*conn, [](redisAsyncContext *ctx, redisCallbackFn *fn, void *priv, int, const char **, const size_t *) {
+        g_deferred_command_ctx = ctx;
+        g_deferred_command_fn = fn;
+        g_deferred_command_priv = priv;
         return REDIS_OK;
     });
     g_fake_connect_calls.store(0);
@@ -1170,6 +1189,7 @@ TEST(Unit, AutoFailoverRoleTimeoutForcesReconnect) {
 
     EXPECT_GE(g_fake_connect_calls.load(), 1);
     EXPECT_FALSE(conn->is_connected());
+    EXPECT_EQ(g_deferred_command_fn, nullptr);
 }
 
 TEST(Unit, AutoFailoverReadonlyReplyPreservesReplyBeforeReconnectAndDoesNotRetry) {
@@ -1196,6 +1216,7 @@ TEST(Unit, AutoFailoverReadonlyReplyPreservesReplyBeforeReconnectAndDoesNotRetry
     g_fake_command_env = &env;
     RedisAsyncConnectionTestAccess::set_async_command_argv_fn(*conn, &fake_command_argv);
     g_fake_connect_calls.store(0);
+    g_fake_free_calls.store(0);
     g_fake_connect_saw_completion.store(false);
 
     std::atomic<bool> completion_seen{false};
@@ -1222,6 +1243,7 @@ TEST(Unit, AutoFailoverReadonlyReplyPreservesReplyBeforeReconnectAndDoesNotRetry
     ASSERT_EQ(env.submitted.size(), 1u);
     EXPECT_EQ(env.submitted[0], "SET");
     EXPECT_GE(g_fake_connect_calls.load(), 1);
+    EXPECT_EQ(g_fake_free_calls.load(), 1);
     EXPECT_TRUE(g_fake_connect_saw_completion.load());
     EXPECT_FALSE(conn->is_connected());
 }

@@ -219,23 +219,12 @@ void RedisAsyncConnection::shutdown_from_dtor_() noexcept {
     pub_channel_.close();
     fail_pre_ready_queue(make_error(error_category::errc::stopped));
 
-    if (ctx_) {
-        // detach our static callbacks and user-data so late invokes are nops
-        set_connect_callback_fn_(ctx_, nullptr);
-        set_disconnect_callback_fn_(ctx_, nullptr);
-        set_push_callback_fn_(ctx_, nullptr);
-        ctx_->data = nullptr;
-        // force free: hiredis guarantees pending callbacks get NULL replies
-        async_free_fn_(ctx_);
-        ctx_ = nullptr;
-    }
+    close_current_context();
 
     if (sslctx_) {
         redisFreeSSLContext(sslctx_); // we own it; safe to free now
         sslctx_ = nullptr;
     }
-    // ensure adapter stops waiting on the fd before it is destroyed
-    adapter_.reset();
     // Best-effort notify waiters (no executor affinity guarantees).
     auto cw = std::move(connect_waiters_);
     connect_waiters_.clear();
@@ -285,20 +274,10 @@ void RedisAsyncConnection::stop() {
         self->role_timer_.cancel();
         self->role_probe_timeout_timer_.cancel();
         self->role_probe_inflight_ = false;
+        self->close_current_context();
         if (self->sslctx_) {
             redisFreeSSLContext(self->sslctx_);
             self->sslctx_ = nullptr;
-        }
-        if (self->adapter_)
-            self->adapter_->stop();
-        self->adapter_.reset();
-        if (self->ctx_) {
-            self->set_connect_callback_fn_(self->ctx_, nullptr);
-            self->set_disconnect_callback_fn_(self->ctx_, nullptr);
-            self->set_push_callback_fn_(self->ctx_, nullptr);
-            self->ctx_->data = nullptr;
-            self->async_disconnect_fn_(self->ctx_);
-            self->ctx_ = nullptr;
         }
     });
 }
@@ -313,8 +292,7 @@ void RedisAsyncConnection::do_connect(ConnectOptions opts) {
             self->connected_.store(false, std::memory_order_relaxed);
             REDIS_INFO_RT(self->log_, "connecting to {}:{} TLS={}", self->opts_.host, self->opts_.port, self->opts_.tls.use_tls);
 
-            // Avoid redisAsyncFree() during reconnect races.
-            self->detach_current_context();
+            self->close_current_context();
             if (self->sslctx_) {
                 redisFreeSSLContext(self->sslctx_); // we own it; safe to free now
                 self->sslctx_ = nullptr;
@@ -388,14 +366,17 @@ void RedisAsyncConnection::schedule_reconnect() {
     });
 }
 
-void RedisAsyncConnection::detach_current_context() {
+void RedisAsyncConnection::close_current_context() {
     if (!ctx_)
         return;
+    if (adapter_)
+        adapter_->stop();
+    adapter_.reset();
     set_connect_callback_fn_(ctx_, nullptr);
     set_disconnect_callback_fn_(ctx_, nullptr);
     set_push_callback_fn_(ctx_, nullptr);
     ctx_->data = nullptr;
-    async_disconnect_fn_(ctx_);
+    async_free_fn_(ctx_);
     ctx_ = nullptr;
 }
 
@@ -1054,7 +1035,7 @@ void RedisAsyncConnection::request_failover_reconnect(std::string reason) {
             self->role_timer_.cancel();
             self->role_probe_timeout_timer_.cancel();
             self->role_probe_inflight_ = false;
-            self->detach_current_context();
+            self->close_current_context();
             self->on_disconnected(REDIS_ERR);
         }
     });
