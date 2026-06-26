@@ -60,6 +60,12 @@ static redis_asio::ConnectOptions opts_from_env() {
             GTEST_SKIP() << redis_asio_tests::redis_runtime_skip_reason();                                               \
     } while (false)
 
+#define REDIS_ASIO_SKIP_IF_NO_TLS_REDIS_RUNTIME()                                                                        \
+    do {                                                                                                                 \
+        if (!redis_asio_tests::tls_redis_runtime_available())                                                            \
+            GTEST_SKIP() << redis_asio_tests::tls_redis_runtime_skip_reason();                                           \
+    } while (false)
+
 static redis_asio::ConnectOptions bogus_opts() {
     redis_asio::ConnectOptions o;
     o.host = "256.256.256.256"; // invalid
@@ -1422,6 +1428,46 @@ TEST(FailoverIntegration, PubSubConnectionReconnectsViaRolePollingAndRestoresSub
 
         c_sub->stop();
         c_pub->stop();
+        co_return; }, asio::detached);
+
+    ioc.run();
+}
+
+TEST(TlsIntegration, ConnectsWithPeerVerificationAndRunsCommands) {
+    REDIS_ASIO_SKIP_IF_NO_TLS_REDIS_RUNTIME();
+    redis_asio::RedisAsyncConnection::initOpenSSL();
+    asio::io_context ioc;
+    auto log = redis_asio::make_clog_logger(redis_asio::Logger::Level::critical, "redis_asio_tls.basic");
+    auto c = redis_asio::RedisAsyncConnection::create(ioc.get_executor(), log);
+
+    asio::co_spawn(ioc, [c]() -> asio::awaitable<void> {
+        using boost::asio::as_tuple;
+        auto opts = redis_asio_tests::tls_redis_runtime_options();
+        auto [connect_ec, already] = co_await c->async_connect(opts, as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(connect_ec);
+        EXPECT_FALSE(already);
+
+        std::error_code ec;
+        redis_asio::RedisValue rv;
+        std::tie(ec, rv) = co_await c->async_command({"PING"}, as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(ec);
+        auto pong = redis_asio::string_like(rv);
+        EXPECT_TRUE(pong.has_value());
+        if (pong)
+            EXPECT_EQ(*pong, "PONG");
+
+        std::tie(ec, rv) = co_await c->async_command({"SET", "tls:test:key", "encrypted"}, as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(ec);
+        EXPECT_FALSE(redis_error_message_from_reply(rv).has_value());
+
+        std::tie(ec, rv) = co_await c->async_command({"GET", "tls:test:key"}, as_tuple(asio::use_awaitable));
+        EXPECT_FALSE(ec);
+        auto value = redis_asio::string_like(rv);
+        EXPECT_TRUE(value.has_value());
+        if (value)
+            EXPECT_EQ(*value, "encrypted");
+
+        c->stop();
         co_return; }, asio::detached);
 
     ioc.run();

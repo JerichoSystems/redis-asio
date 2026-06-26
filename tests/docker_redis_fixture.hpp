@@ -11,6 +11,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
 #include <memory>
 #include <mutex>
 #include <optional>
@@ -81,6 +82,11 @@ inline bool docker_available() {
     return available;
 }
 
+inline bool openssl_available() {
+    static const bool available = run_ok("openssl version");
+    return available;
+}
+
 inline std::string unique_name(std::string_view prefix) {
     static std::atomic<unsigned long long> seq{0};
     std::ostringstream os;
@@ -147,6 +153,15 @@ struct DockerContainer {
         }
         throw std::runtime_error("Valkey container did not become ready");
     }
+
+    void wait_tls_ready() const {
+        for (int i = 0; i < 120; ++i) {
+            if (exec_ok("valkey-cli --tls --insecure -p 6379 ping"))
+                return;
+            std::this_thread::sleep_for(250ms);
+        }
+        throw std::runtime_error("TLS Valkey container did not become ready");
+    }
 };
 
 inline DockerContainer run_valkey_container(const std::string &name,
@@ -171,6 +186,80 @@ inline DockerContainer run_valkey_container(const std::string &name,
         throw std::runtime_error("docker run failed: " + id);
     DockerContainer container{id};
     container.wait_ready();
+    return container;
+}
+
+struct TestCertificates {
+    std::filesystem::path dir;
+    std::filesystem::path server_crt;
+    std::filesystem::path server_key;
+
+    TestCertificates() {
+        auto base = std::filesystem::temp_directory_path() / unique_name("redis-asio-tls");
+        std::filesystem::create_directories(base);
+        dir = base;
+        server_crt = dir / "server.crt";
+        server_key = dir / "server.key";
+
+        auto cmd = "openssl req -x509 -nodes -newkey rsa:2048 -days 1"
+                   " -keyout "
+                   + shell_quote(server_key.string())
+                   + " -out " + shell_quote(server_crt.string())
+                   + " -subj " + shell_quote("/CN=localhost")
+                   + " -addext " + shell_quote("subjectAltName=DNS:localhost,IP:127.0.0.1")
+                   + " 2>&1";
+        int status = 0;
+        auto out = run_capture(cmd, &status);
+        if (status != 0)
+            throw std::runtime_error("openssl certificate generation failed: " + out);
+
+        std::filesystem::permissions(dir,
+                                     std::filesystem::perms::owner_all | std::filesystem::perms::group_read
+                                         | std::filesystem::perms::group_exec | std::filesystem::perms::others_read
+                                         | std::filesystem::perms::others_exec,
+                                     std::filesystem::perm_options::replace);
+        std::filesystem::permissions(server_crt,
+                                     std::filesystem::perms::owner_read | std::filesystem::perms::group_read
+                                         | std::filesystem::perms::others_read,
+                                     std::filesystem::perm_options::replace);
+        std::filesystem::permissions(server_key,
+                                     std::filesystem::perms::owner_read | std::filesystem::perms::group_read
+                                         | std::filesystem::perms::others_read,
+                                     std::filesystem::perm_options::replace);
+    }
+
+    TestCertificates(const TestCertificates &) = delete;
+    TestCertificates &operator=(const TestCertificates &) = delete;
+
+    ~TestCertificates() {
+        if (!dir.empty()) {
+            std::error_code ec;
+            std::filesystem::remove_all(dir, ec);
+        }
+    }
+};
+
+inline DockerContainer run_valkey_tls_container(const std::string &name, const TestCertificates &certs) {
+    std::ostringstream cmd;
+    cmd << "docker run -d --rm --name " << shell_quote(name)
+        << " -v " << shell_quote(certs.dir.string() + ":/tls:ro")
+        << " -p 127.0.0.1::6379 valkey/valkey:8-alpine valkey-server"
+        << " --port 0"
+        << " --tls-port 6379"
+        << " --tls-cert-file /tls/server.crt"
+        << " --tls-key-file /tls/server.key"
+        << " --tls-ca-cert-file /tls/server.crt"
+        << " --tls-auth-clients no"
+        << " --appendonly no --save " << shell_quote("")
+        << " --protected-mode no"
+        << " 2>&1";
+
+    int status = 0;
+    auto id = run_capture(cmd.str(), &status);
+    if (status != 0 || id.empty())
+        throw std::runtime_error("docker run TLS Valkey failed: " + id);
+    DockerContainer container{id};
+    container.wait_tls_ready();
     return container;
 }
 
@@ -228,6 +317,65 @@ inline std::string redis_runtime_skip_reason() {
 
 inline redis_asio::ConnectOptions redis_runtime_options() {
     return managed_redis().options;
+}
+
+struct ManagedTlsRedis {
+    bool initialized{false};
+    bool available{false};
+    std::string skip_reason;
+    std::optional<TestCertificates> certs;
+    std::optional<DockerContainer> container;
+    redis_asio::ConnectOptions options;
+
+    void ensure_started() {
+        if (initialized)
+            return;
+        initialized = true;
+
+        if (!docker_available()) {
+            skip_reason = "Docker is not available";
+            return;
+        }
+        if (!openssl_available()) {
+            skip_reason = "openssl is not available";
+            return;
+        }
+
+        try {
+            certs.emplace();
+            auto name = unique_name("redis-asio-valkey-tls");
+            container.emplace(run_valkey_tls_container(name, *certs));
+            options.host = "127.0.0.1";
+            options.port = container->mapped_port();
+            options.tls.use_tls = true;
+            options.tls.verify_peer = true;
+            options.tls.ca_file = certs->server_crt.string();
+            available = true;
+        } catch (const std::exception &ex) {
+            skip_reason = ex.what();
+            container.reset();
+            certs.reset();
+            available = false;
+        }
+    }
+};
+
+inline ManagedTlsRedis &managed_tls_redis() {
+    static ManagedTlsRedis instance;
+    instance.ensure_started();
+    return instance;
+}
+
+inline bool tls_redis_runtime_available() {
+    return managed_tls_redis().available;
+}
+
+inline std::string tls_redis_runtime_skip_reason() {
+    return managed_tls_redis().skip_reason.empty() ? "TLS Redis test runtime is unavailable" : managed_tls_redis().skip_reason;
+}
+
+inline redis_asio::ConnectOptions tls_redis_runtime_options() {
+    return managed_tls_redis().options;
 }
 
 class TcpProxy {
