@@ -12,7 +12,7 @@ parameters:
 executors:
   linux:
     machine:
-      image: ubuntu-2204:current
+      image: ubuntu-2404:current
     resource_class: large
     environment:
       CMAKE_GENERATOR: Ninja
@@ -41,6 +41,8 @@ commands:
             sudo apt-get update
             sudo apt-get install -y git cmake ninja-build ccache pkg-config curl zip unzip \
               python3 python3-pip redis-tools linux-libc-dev lcov gcovr openssl
+            gcc --version
+            g++ --version
             docker version || (sudo service docker start && docker version)
   install_tooling_macos:
     steps:
