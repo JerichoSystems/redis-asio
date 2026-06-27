@@ -322,9 +322,27 @@ auto RedisAsyncConnection::async_command(const std::vector<std::string> &argv, C
                 asio::dispatch(self->strand_, [self, argv, handler = std::move(handler)]() mutable {
                     auto ex_fallback = self->strand_;
                     auto ex_for_handler = boost::asio::get_associated_executor(handler, ex_fallback);
+                    auto weak_self = self->weak_from_this();
                     CommandHandler completion{
-                        [h = std::move(handler), ex_for_handler](std::error_code ec, RedisValue value) mutable {
-                            detail::complete_on_associated(std::move(h), ex_for_handler, std::move(ec), std::move(value));
+                        [h = std::move(handler), ex_for_handler, weak_self](std::error_code ec, RedisValue value) mutable {
+                            std::shared_ptr<RedisAsyncConnection> reconnect_self;
+                            if (!ec) {
+                                if (auto self = weak_self.lock()) {
+                                    if (self->opts_.auto_failover.enabled && is_role_error_value(value))
+                                        reconnect_self = std::move(self);
+                                }
+                            }
+                            auto alloc = boost::asio::get_associated_allocator(h);
+                            auto thunk = [h2 = std::move(h), reconnect_self = std::move(reconnect_self), ec, value = std::move(value)]() mutable {
+                                detail::complete(h2, ec, std::move(value));
+                                if (reconnect_self) {
+                                    auto strand = reconnect_self->strand_;
+                                    asio::dispatch(strand, [self = std::move(reconnect_self)] {
+                                        self->request_failover_reconnect("Redis role error reply");
+                                    });
+                                }
+                            };
+                            detail::post_or_dispatch(ex_for_handler, boost::asio::bind_allocator(alloc, std::move(thunk)));
                         }};
 
                     if (self->stopping_ || self->state_ == ConnectionState::stopping) {
