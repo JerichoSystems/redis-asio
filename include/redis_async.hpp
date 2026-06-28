@@ -116,6 +116,13 @@ struct ConnectOptions {
         queue_until_ready
     };
 
+    struct AutoFailoverOptions {
+        bool enabled{false};
+        std::chrono::milliseconds primary_check_interval{std::chrono::seconds(5)};
+        std::chrono::milliseconds primary_check_jitter{std::chrono::milliseconds(500)};
+        std::chrono::milliseconds primary_check_timeout{std::chrono::seconds(2)};
+    };
+
     std::string host{"127.0.0.1"};
     uint16_t port{6379};
     std::chrono::milliseconds connect_timeout{std::chrono::seconds(5)};
@@ -133,6 +140,7 @@ struct ConnectOptions {
     CommandPolicy command_policy{CommandPolicy::fail_fast};
     // max queued commands when command_policy == queue_until_ready.
     std::size_t pre_ready_queue_limit{1024};
+    AutoFailoverOptions auto_failover{};
 };
 
 /**
@@ -399,7 +407,7 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
 
     // One-roundtrip: HELLO 3 [AUTH user pass|AUTH default pass] [SETNAME name]
     void send_handshake_hello();
-    void handle_handshake_result(std::error_code ec, std::string summary);
+    void handle_handshake_result(std::error_code ec, std::string summary, std::string role = {});
     void restore_subscriptions();
 
     // SUB/PSUB helper
@@ -440,6 +448,13 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     // keepalive
     void start_keepalive();
     void schedule_next_ping();
+    void start_role_monitor();
+    void schedule_next_role_check();
+    void issue_role_check();
+    void handle_role_probe_result(uint64_t generation, std::error_code ec, std::string role);
+    void request_failover_reconnect(std::string reason);
+    void close_current_context();
+    static bool is_role_error_value(const RedisValue &value);
     using CommandHandler = asio::any_completion_handler<void(std::error_code, RedisValue)>;
     struct PendingCommand {
         std::vector<std::string> argv;
@@ -447,6 +462,10 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     };
     struct CommandBaton {
         CommandHandler completion;
+    };
+    struct RoleProbeBaton {
+        std::weak_ptr<RedisAsyncConnection> w;
+        uint64_t generation{0};
     };
     void submit_command_ready(std::vector<std::string> argv, CommandHandler completion);
     void enqueue_or_reject_command(std::vector<std::string> argv, CommandHandler completion);
@@ -458,7 +477,6 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     using RedisAsyncSetConnectCallbackFn = int (*)(redisAsyncContext *, redisConnectCallback *);
     using RedisAsyncSetDisconnectCallbackFn = int (*)(redisAsyncContext *, redisDisconnectCallback *);
     using RedisAsyncSetPushCallbackFn = redisAsyncPushFn *(*)(redisAsyncContext *, redisAsyncPushFn *);
-    using RedisAsyncDisconnectFn = void (*)(redisAsyncContext *);
     using RedisAsyncFreeFn = void (*)(redisAsyncContext *);
     using RedisAsyncCommandArgvFn = int (*)(redisAsyncContext *, redisCallbackFn *, void *, int, const char **, const size_t *);
 
@@ -470,6 +488,8 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
     asio::strand<executor_type> strand_;
     asio::steady_timer reconnect_timer_;
     asio::steady_timer ping_timer_;
+    asio::steady_timer role_timer_;
+    asio::steady_timer role_probe_timeout_timer_;
     // Note: with Boost 1.82+ channel + use_awaitable, the message signature usually carries an error_code first.
     asio::experimental::concurrent_channel<void(boost::system::error_code, PublishMessage)> pub_channel_;
 
@@ -502,14 +522,17 @@ class RedisAsyncConnection : public std::enable_shared_from_this<RedisAsyncConne
 
     // Handshake & health state
     std::string hello_summary_;
+    std::string server_role_;
     Health health_{Health::healthy};
     int ping_failures_{0};
+    bool role_probe_inflight_{false};
+    uint64_t role_probe_generation_{0};
+    bool failover_reconnect_pending_{false};
 
     RedisAsyncConnectFn async_connect_fn_{::redisAsyncConnect};
     RedisAsyncSetConnectCallbackFn set_connect_callback_fn_{::redisAsyncSetConnectCallback};
     RedisAsyncSetDisconnectCallbackFn set_disconnect_callback_fn_{::redisAsyncSetDisconnectCallback};
     RedisAsyncSetPushCallbackFn set_push_callback_fn_{::redisAsyncSetPushCallback};
-    RedisAsyncDisconnectFn async_disconnect_fn_{::redisAsyncDisconnect};
     RedisAsyncFreeFn async_free_fn_{::redisAsyncFree};
     RedisAsyncCommandArgvFn async_command_argv_fn_{::redisAsyncCommandArgv};
 
