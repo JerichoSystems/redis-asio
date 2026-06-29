@@ -25,9 +25,22 @@ namespace asio = boost::asio;
 
 // --- Helpers ---------------------------------------------------------------
 
+static bool use_external_redis_runtime() {
+    const char *external = std::getenv("REDIS_ASIO_USE_EXTERNAL_REDIS");
+    return external && std::strcmp(external, "1") == 0;
+}
+
+static bool use_managed_tls_runtime() {
+    const char *managed_tls = std::getenv("REDIS_ASIO_TEST_TLS");
+    return !use_external_redis_runtime() && managed_tls && std::strcmp(managed_tls, "1") == 0;
+}
+
 static redis_asio::ConnectOptions opts_from_env() {
-    if (const char *external = std::getenv("REDIS_ASIO_USE_EXTERNAL_REDIS"); !external || std::strcmp(external, "1") != 0)
+    if (!use_external_redis_runtime()) {
+        if (use_managed_tls_runtime())
+            return redis_asio_tests::tls_redis_runtime_options();
         return redis_asio_tests::redis_runtime_options();
+    }
 
     redis_asio::ConnectOptions o;
     if (const char *h = std::getenv("REDIS_HOST"))
@@ -57,8 +70,12 @@ static redis_asio::ConnectOptions opts_from_env() {
 
 #define REDIS_ASIO_SKIP_IF_NO_REDIS_RUNTIME()                                                                            \
     do {                                                                                                                 \
-        if (!redis_asio_tests::redis_runtime_available())                                                                \
+        if (use_managed_tls_runtime()) {                                                                                 \
+            if (!redis_asio_tests::tls_redis_runtime_available())                                                        \
+                GTEST_SKIP() << redis_asio_tests::tls_redis_runtime_skip_reason();                                       \
+        } else if (!redis_asio_tests::redis_runtime_available()) {                                                       \
             GTEST_SKIP() << redis_asio_tests::redis_runtime_skip_reason();                                               \
+        }                                                                                                                \
     } while (false)
 
 #define REDIS_ASIO_SKIP_IF_NO_TLS_REDIS_RUNTIME()                                                                        \

@@ -111,9 +111,9 @@ commands:
           when: always
           command: |
             mkdir -p build/ci-diagnostics
-            if [ -f build/ctest-results.xml ]; then
-              cp build/ctest-results.xml build/ci-diagnostics/ctest-results.xml || true
-            fi
+            find build -maxdepth 1 -name 'ctest-results*.xml' -type f | while IFS= read -r file; do
+              cp "$file" "build/ci-diagnostics/$(basename "$file")" || true
+            done
             if [ -f build/Testing/Temporary/LastTest.log ]; then
               cp build/Testing/Temporary/LastTest.log build/ci-diagnostics/LastTest.log || true
             fi
@@ -199,6 +199,9 @@ jobs:
       - run:
           name: Run tests
           command: ctest --test-dir build --output-on-failure -j 2 --output-junit build/ctest-results.xml
+      - run:
+          name: Run Redis async tests over TLS
+          command: REDIS_ASIO_TEST_TLS=1 ctest --test-dir build --output-on-failure -R '^redis_async_tests$' --output-junit build/ctest-results-tls.xml
       - collect_ci_diagnostics
       - when:
           condition:
@@ -335,6 +338,13 @@ jobs:
             UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
             ASAN_OPTIONS=detect_leaks=1:strict_string_checks=1:check_initialization_order=1 \
             ctest --test-dir build --output-on-failure -j 2 --output-junit build/ctest-results.xml
+      - run:
+          name: Run Redis async tests over TLS under sanitizers
+          command: |
+            UBSAN_OPTIONS=print_stacktrace=1:halt_on_error=1 \
+            ASAN_OPTIONS=detect_leaks=1:strict_string_checks=1:check_initialization_order=1 \
+            REDIS_ASIO_TEST_TLS=1 \
+            ctest --test-dir build --output-on-failure -R '^redis_async_tests$' --output-junit build/ctest-results-tls.xml
       - collect_ci_diagnostics
 
   port-smoke-overlay-linux:
